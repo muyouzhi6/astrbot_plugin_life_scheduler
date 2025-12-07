@@ -29,7 +29,7 @@
   "outfit_desc": {
     "type": "string",
     "description": "穿搭生成的提示词要求",
-    "default": "今日穿搭描述（从里到外、从上到下、衣裤鞋袜等，符合天气和心情）。"
+    "default": "今日穿搭描述（从里到外、从上到下、衣裤内衣裤鞋袜、饰品等，符合天气和心情）。"
   },
   "report_targets": {
     "type": "list",
