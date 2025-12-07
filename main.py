@@ -248,7 +248,6 @@ class LifeScheduler:
 
 # --- Main Class ---
 
-@filter.event_message_type(filter.EventMessageType.ALL)
 class Main(Star):
     def __init__(self, context: Context, *args, **kwargs) -> None:
         super().__init__(context)
