@@ -3,527 +3,460 @@ import os
 import re
 import datetime
 import asyncio
+import aiohttp
 import aiofiles
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional, List, Literal, Callable, Awaitable
-
+from typing import Dict, Any, Optional, List, Callable, Awaitable
 try:
     import holidays
 except ImportError:
     holidays = None
-
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api import logger
-from astrbot.api.all import Star, Context, Plain, Image
+from astrbot.api.star import Context, Star, register
 from astrbot.core.star.star_tools import StarTools
 from astrbot.core.provider.entities import ProviderRequest
-from astrbot.core.message.message_event_result import MessageChain
-from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
-from astrbot.core import html_renderer
 
-# --- Config Definitions ---
+WEEKDAY_NAMES = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+WEEKDAY_CN = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+
+WEEK_TEMPLATES = {
+    "regular": {"name": "常规周", "emoji": "📊", "description": "普通的一周",
+        "hints": {"monday": "新的一周开始", "tuesday": "进入状态", "wednesday": "周中保持节奏", "thursday": "继续推进", "friday": "收尾工作", "saturday": "自由安排", "sunday": "休息充电"},
+        "suggested_activities": {"monday": ["整理计划"], "tuesday": ["专注工作"], "wednesday": ["日常任务"], "thursday": ["推进项目"], "friday": ["收尾"], "saturday": ["出门逛逛"], "sunday": ["休息"]}},
+    "sprint": {"name": "冲刺周", "emoji": "🚀", "description": "有重要目标的一周",
+        "hints": {"monday": "明确目标", "tuesday": "专注推进", "wednesday": "检查进度", "thursday": "最后冲刺", "friday": "收尾验收", "saturday": "彻底放松", "sunday": "恢复休息"},
+        "suggested_activities": {"monday": ["制定计划"], "tuesday": ["核心任务"], "wednesday": ["检查进度"], "thursday": ["冲刺"], "friday": ["庆祝"], "saturday": ["放松"], "sunday": ["复盘"]}},
+    "relax": {"name": "放松周", "emoji": "🌴", "description": "享受生活的一周",
+        "hints": {"monday": "慢慢来", "tuesday": "做喜欢的事", "wednesday": "约朋友", "thursday": "探索新事物", "friday": "继续享受", "saturday": "出门走走", "sunday": "安静充电"},
+        "suggested_activities": {"monday": ["睡懒觉"], "tuesday": ["兴趣爱好"], "wednesday": ["约朋友"], "thursday": ["探店"], "friday": ["看电影"], "saturday": ["逛街"], "sunday": ["宅家"]}},
+}
+
+def get_week_id(date=None):
+    if date is None: date = datetime.datetime.now()
+    return date.strftime("%Y-W%W")
+
+def get_monday_of_week(date=None):
+    if date is None: date = datetime.datetime.now()
+    return (date - datetime.timedelta(days=date.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
 
 @dataclass
 class ChatReference:
-    umo: str  # unified_msg_origin
+    umo: str
     count: int = 20
-    
     @staticmethod
-    def from_dict(data: dict) -> 'ChatReference':
-        if not isinstance(data, dict):
-            return ChatReference(umo="")
-        return ChatReference(
-            umo=str(data.get("umo", "")),
-            count=int(data.get("count", 20))
-        )
-    
-    def to_dict(self) -> dict:
-        return {"umo": self.umo, "count": self.count}
+    def from_dict(data):
+        if not isinstance(data, dict): return ChatReference(umo="")
+        return ChatReference(umo=str(data.get("umo", "")), count=int(data.get("count", 20)))
+
+@dataclass
+class WeatherConfig:
+    api_key: str = ""
+    api_host: str = ""
+    default_city: str = ""
+    @staticmethod
+    def from_dict(data):
+        if not isinstance(data, dict): return WeatherConfig()
+        return WeatherConfig(api_key=str(data.get("api_key", "")), api_host=str(data.get("api_host", "")), default_city=str(data.get("default_city", "")))
 
 @dataclass
 class SchedulerConfig:
     schedule_time: str = "07:00"
     reference_history_days: int = 3
     reference_chats: List[ChatReference] = field(default_factory=list)
+    weather: WeatherConfig = field(default_factory=WeatherConfig)
+    week_plan_enabled: bool = True
+    week_plan_day: str = "monday"
+    week_plan_time: str = "06:00"
+    default_week_template: str = "regular"
     prompt_template: str = """# Role: Life Scheduler
-请根据以下信息，为自己规划一份今天的生活安排。请代入你的人设，生成的内容应富有生活气息，避免机械的流水账。
-
-## Context
+请根据以下信息规划今天的生活安排。
 - 日期：{date_str} {weekday} {holiday}
+- 天气：{weather}
 - 人设：{persona_desc}
-- 历史日程参考（最近几天）：
-{history_schedules}
-- 近期对话记忆（参考这些话题来安排相关活动）：
-{recent_chats}
-
-## Tasks
-1. outfit: 设计今日穿搭。{outfit_desc}
-2. schedule: 规划今日日程。包含早中晚的关键活动和心境，可以是工作学习，也可以是娱乐放松，请根据日期属性（工作日/周末/节日）合理安排。
-
-## Output Format
-请务必严格遵循 JSON 格式返回，不要包含 Markdown 代码块标记（如 ```json），也不要包含任何额外的解释文本。
-格式如下：
-{{
-    "outfit": "一句话描述穿搭",
-    "schedule": "一段话描述今日日程"
-}}
+- 本周主题：{week_theme}
+- 本周目标：{week_goals}
+- 今日定位：{today_hint}
+- 建议活动：{today_suggested}
+- 本周进度：{week_progress}
+- 历史日程：{history_schedules}
+- 近期对话：{recent_chats}
+请生成JSON：{{"outfit": "今日穿搭", "schedule": "今日日程"}}
 """
-    outfit_desc: str = "一句话描述，结合天气、心情和今日活动。"
-
+    outfit_desc: str = "今日穿搭描述"
+    
     @staticmethod
-    def from_dict(data: dict) -> 'SchedulerConfig':
+    def from_dict(data):
         config = SchedulerConfig()
-        if not isinstance(data, dict):
-            return config
-            
+        if not isinstance(data, dict): return config
         config.schedule_time = data.get("schedule_time", "07:00")
         config.reference_history_days = data.get("reference_history_days", 3)
-        
         refs = data.get("reference_chats", [])
         if isinstance(refs, list):
             config.reference_chats = [ChatReference.from_dict(r) for r in refs if isinstance(r, dict)]
-        
-        if "prompt_template" in data:
-            config.prompt_template = data["prompt_template"]
-        if "outfit_desc" in data:
-            config.outfit_desc = data["outfit_desc"]
-            
+        config.weather = WeatherConfig(api_key=str(data.get("weather_api_key", "")), api_host=str(data.get("weather_api_host", "")), default_city=str(data.get("weather_default_city", "")))
+        config.week_plan_enabled = data.get("week_plan_enabled", True)
+        config.week_plan_day = data.get("week_plan_day", "monday")
+        config.week_plan_time = data.get("week_plan_time", "06:00")
+        config.default_week_template = data.get("default_week_template", "regular")
+        if "prompt_template" in data: config.prompt_template = data["prompt_template"]
+        if "outfit_desc" in data: config.outfit_desc = data["outfit_desc"]
         return config
 
-    def to_dict(self) -> dict:
-        return {
-            "schedule_time": self.schedule_time,
-            "reference_history_days": self.reference_history_days,
-            "reference_chats": [r.to_dict() for r in self.reference_chats],
-            "prompt_template": self.prompt_template,
-            "outfit_desc": self.outfit_desc
-        }
-
-# --- Helper Functions ---
-
-def extract_json_from_text(text: str) -> Optional[dict]:
-    """
-    Extracts the first JSON object from the text using a stack-based approach
-    to handle nested braces correctly.
-    """
-    text = text.strip()
-    # Remove markdown code blocks
-    text = re.sub(r'^```json\s*', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^```\s*', '', text, flags=re.MULTILINE)
-    text = re.sub(r'```\s*$', '', text, flags=re.MULTILINE)
-    
-    start_index = text.find('{')
-    if start_index == -1:
-        return None
-    
-    brace_level = 0
-    in_string = False
-    escape = False
-    
-    for i, char in enumerate(text[start_index:], start=start_index):
-        if in_string:
-            if escape:
-                escape = False
-            elif char == '\\':
-                escape = True
-            elif char == '"':
-                in_string = False
+def extract_json_from_text(text):
+    text = re.sub(r'^```json\s*|^```\s*|```\s*$', '', text.strip(), flags=re.MULTILINE)
+    start = text.find('{')
+    if start == -1: return None
+    level, in_str, esc = 0, False, False
+    for i, c in enumerate(text[start:], start):
+        if in_str:
+            if esc: esc = False
+            elif c == '\\': esc = True
+            elif c == '"': in_str = False
         else:
-            if char == '"':
-                in_string = True
-            elif char == '{':
-                brace_level += 1
-            elif char == '}':
-                brace_level -= 1
-                if brace_level == 0:
-                    json_str = text[start_index:i+1]
-                    try:
-                        return json.loads(json_str)
-                    except json.JSONDecodeError:
-                         pass
+            if c == '"': in_str = True
+            elif c == '{': level += 1
+            elif c == '}':
+                level -= 1
+                if level == 0:
+                    try: return json.loads(text[start:i+1])
+                    except: pass
     return None
 
-async def get_recent_chats(context: Context, umo: str, count: int) -> str:
-    """获取指定会话的最近聊天记录"""
-    try:
-        # 尝试从 conversation_manager 获取
-        # session = MessageSesion.from_str(umo) # unused
-        # 1. 获取当前 conversation_id
-        cid = await context.conversation_manager.get_curr_conversation_id(umo)
-        if not cid:
-            return "无最近对话记录"
-            
-        # 2. 获取 conversation
-        conv = await context.conversation_manager.get_conversation(umo, cid)
-        if not conv or not conv.history:
-            return "无最近对话记录"
-            
-        # 3. 解析 history
-        history = json.loads(conv.history)
-        
-        # 4. 取最近 count 条
-        recent = history[-count:] if count > 0 else []
-        
-        # 5. 格式化
-        formatted = []
-        for msg in recent:
-            role = msg.get("role", "unknown")
-            content = msg.get("content", "")
-            if role == "user":
-                formatted.append(f"用户: {content}")
-            elif role == "assistant":
-                formatted.append(f"我: {content}")
-                
-        return "\n".join(formatted)
-        
-    except Exception as e:
-        logger.error(f"Failed to get recent chats for {umo}: {e}")
-        return "获取对话记录失败"
-
-def get_holiday_info(date: datetime.date) -> str:
-    """获取节日信息（中国）"""
-    if holidays is None:
-        return ""
-    
-    try:
-        cn_holidays = holidays.CN()
-        holiday_name = cn_holidays.get(date)
-        if holiday_name:
-            return f"今天是 {holiday_name}"
-    except Exception:
-        return ""
+def extract_city_from_persona(persona):
+    cities = ["北京", "上海", "广州", "深圳", "杭州", "南京", "成都", "武汉", "西安", "长沙", "重庆", "天津", "苏州", "厦门", "青岛"]
+    for c in cities:
+        if c in persona: return c
     return ""
 
+async def get_recent_chats(context, umo, count):
+    try:
+        cid = await context.conversation_manager.get_curr_conversation_id(umo)
+        if not cid: return "无"
+        conv = await context.conversation_manager.get_conversation(umo, cid)
+        if not conv or not conv.history: return "无"
+        history = json.loads(conv.history)
+        recent = history[-count:] if count > 0 else []
+        formatted = [f"{'用户' if m.get('role')=='user' else '我'}: {m.get('content', '')}" for m in recent]
+        return "\n".join(formatted) if formatted else "无"
+    except: return "无"
 
-# --- Scheduler Class ---
+def get_holiday_info(date):
+    if holidays is None: return ""
+    try:
+        h = holidays.CN().get(date)
+        return f"今天是 {h}" if h else ""
+    except: return ""
 
-class LifeScheduler:
-    def __init__(self, schedule_time: str, task: Callable[[], Awaitable[None]]):
-        self.scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
-        self.schedule_time = schedule_time
-        self.task = task
-        self.job = None
-
-    def start(self):
+class WeatherService:
+    def __init__(self, config):
+        self.config = config
+        self._session = None
+    
+    async def _get_session(self):
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+        return self._session
+    
+    async def close(self):
+        if self._session and not self._session.closed: await self._session.close()
+    
+    async def get_weather(self, city):
+        if not self.config.api_key or not self.config.api_host: return "未配置天气API"
         try:
-            hour, minute = self.schedule_time.split(":")
-            self.job = self.scheduler.add_job(
-                self.task,
-                'cron',
-                hour=hour,
-                minute=minute,
-                id='daily_schedule_gen'
-            )
-            self.scheduler.start()
-            logger.info(f"Life Scheduler started at {hour}:{minute}")
-        except Exception as e:
-            logger.error(f"Failed to setup scheduler: {e}")
+            session = await self._get_session()
+            host = self.config.api_host.replace("https://", "").replace("http://", "").rstrip("/")
+            headers = {"X-QW-Api-Key": self.config.api_key}
+            async with session.get(f"https://{host}/geo/v2/city/lookup", params={"location": city, "number": 1}, headers=headers) as r:
+                if r.status != 200: return "城市查询失败"
+                d = await r.json()
+                if d.get("code") != "200" or not d.get("location"): return f"未找到城市: {city}"
+                loc_id = d["location"][0]["id"]
+            async with session.get(f"https://{host}/v7/weather/now", params={"location": loc_id}, headers=headers) as r:
+                if r.status != 200: return "天气查询失败"
+                d = await r.json()
+                if d.get("code") != "200": return "天气查询失败"
+                n = d.get("now", {})
+                return f"{city}: {n.get('text', '?')}, {n.get('temp', '?')}°C"
+        except Exception as e: return f"天气查询失败: {e}"
 
-    def update_schedule_time(self, new_time: str):
-        if new_time == self.schedule_time:
-            return
-        
-        try:
-            hour, minute = new_time.split(":")
-            self.schedule_time = new_time
-            if self.job:
-                self.job.reschedule('cron', hour=hour, minute=minute)
-                logger.info(f"Life Scheduler rescheduled to {hour}:{minute}")
-        except Exception as e:
-            logger.error(f"Failed to update scheduler: {e}")
-
-    def shutdown(self):
-        if self.scheduler.running:
-            self.scheduler.shutdown()
-
-# --- Main Class ---
-
+@register("life_scheduler", "Assistant", "生活日程管理插件", "2.0.0", "repo")
 class Main(Star):
-    def __init__(self, context: Context, *args, **kwargs) -> None:
+    def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.context = context
-        
         self.base_dir = StarTools.get_data_dir("astrbot_plugin_life_scheduler")
-        self.config_path = self.base_dir / "config.json"
         self.data_path = self.base_dir / "data.json"
-        
         self.generation_lock = asyncio.Lock()
         self.data_lock = asyncio.Lock()
-        self.failed_dates = set() # Track dates where generation failed to avoid infinite retries
-        
-        self.config = self.load_config()
-        self.schedule_data = self.load_data()
-        
-        self.scheduler = LifeScheduler(self.config.schedule_time, self.daily_schedule_task)
-        self.scheduler.start()
-
-    def load_config(self) -> SchedulerConfig:
-        if self.config_path.exists():
-            try:
-                with open(self.config_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    return SchedulerConfig.from_dict(data)
-            except json.JSONDecodeError:
-                logger.error(f"Config file is corrupted: {self.config_path}")
-            except Exception as e:
-                logger.exception(f"Failed to load config: {e}")
-        return SchedulerConfig()
-
-    async def save_config(self):
+        self.failed_dates = set()
+        self.config = SchedulerConfig.from_dict(config)
+        self.schedule_data = self._load_data_sync()
+        self.weather_service = WeatherService(self.config.weather)
+        self.scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
+        self._setup_scheduler()
+        logger.info("[LifeScheduler] Initialized")
+    
+    def _setup_scheduler(self):
         try:
-            # Atomic write
-            temp_path = self.config_path.with_suffix(".tmp")
-            async with aiofiles.open(temp_path, 'w', encoding='utf-8') as f:
-                await f.write(json.dumps(self.config.to_dict(), indent=4, ensure_ascii=False))
-            
-            if os.name == 'nt' and self.config_path.exists():
-                 os.remove(self.config_path) # Windows replace fix
-            os.replace(temp_path, self.config_path)
+            h, m = self.config.schedule_time.split(":")
+            self.scheduler.add_job(self._daily_task, 'cron', hour=int(h), minute=int(m), id="daily")
+            if self.config.week_plan_enabled:
+                wh, wm = self.config.week_plan_time.split(":")
+                day_map = {"monday": "mon", "tuesday": "tue", "wednesday": "wed", "thursday": "thu", "friday": "fri", "saturday": "sat", "sunday": "sun"}
+                self.scheduler.add_job(self._weekly_task, 'cron', day_of_week=day_map.get(self.config.week_plan_day, "mon"), hour=int(wh), minute=int(wm), id="weekly")
+            self.scheduler.start()
         except Exception as e:
-            logger.exception(f"Failed to save config: {e}")
-
-    def load_data(self) -> Dict[str, Any]:
+            logger.error(f"Scheduler setup failed: {e}")
+    
+    def _load_data_sync(self):
         if self.data_path.exists():
             try:
-                with open(self.data_path, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except json.JSONDecodeError:
-                logger.error(f"Data file is corrupted: {self.data_path}")
-            except Exception as e:
-                logger.exception(f"Failed to load data: {e}")
+                with open(self.data_path, 'r', encoding='utf-8') as f: return json.load(f)
+            except: pass
         return {}
-
-    async def save_data(self):
+    
+    async def _save_data(self):
         async with self.data_lock:
             try:
-                # Atomic write
-                temp_path = self.data_path.with_suffix(".tmp")
-                async with aiofiles.open(temp_path, 'w', encoding='utf-8') as f:
-                    await f.write(json.dumps(self.schedule_data, indent=4, ensure_ascii=False))
-                
-                if os.name == 'nt' and self.data_path.exists():
-                    os.remove(self.data_path) # Windows replace fix
-                os.replace(temp_path, self.data_path)
+                self.base_dir.mkdir(parents=True, exist_ok=True)
+                async with aiofiles.open(self.data_path, 'w', encoding='utf-8') as f:
+                    await f.write(json.dumps(self.schedule_data, indent=2, ensure_ascii=False))
             except Exception as e:
-                logger.exception(f"Failed to save data: {e}")
-
-    async def daily_schedule_task(self):
-        """定时任务：生成日程"""
-        logger.info("Starting daily schedule generation task...")
-        today_str = datetime.datetime.now().strftime("%Y-%m-%d")
-        
-        schedule_info = await self.generate_schedule_with_llm()
-        if not schedule_info:
-            logger.error("Failed to generate schedule.")
-            return
-
-        async with self.data_lock:
-            self.schedule_data[today_str] = schedule_info
-        await self.save_data()
-        
-    async def generate_schedule_with_llm(self) -> Optional[Dict[str, str]]:
-        """调用 LLM 生成日程"""
+                logger.error(f"Save failed: {e}")
+    
+    async def _get_persona(self):
+        try:
+            if hasattr(self.context, "persona_manager"):
+                p = await self.context.persona_manager.get_default_persona_v3()
+                if hasattr(p, "get"): return p.get("prompt", "")
+                if hasattr(p, "prompt"): return p.prompt
+        except: pass
+        return "一个热爱生活的人"
+    
+    def _get_week_plan(self):
+        week_id = get_week_id()
+        plans = self.schedule_data.get("week_plans", {})
+        if week_id in plans: return plans[week_id]
+        t = WEEK_TEMPLATES.get(self.config.default_week_template, WEEK_TEMPLATES["regular"])
+        return {"theme": f"{t['emoji']} {t['name']}", "goals": ["按日常节奏"], "daily_hints": t["hints"], "suggested_activities": t["suggested_activities"], "generated": False}
+    
+    def _get_week_progress(self):
+        monday = get_monday_of_week()
         today = datetime.datetime.now()
-        date_str = today.strftime("%Y年%m月%d日")
-        weekday = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"][today.weekday()]
-        holiday = get_holiday_info(today.date())
+        lines = []
+        for i in range(7):
+            d = monday + datetime.timedelta(days=i)
+            if d.date() > today.date(): break
+            ds = d.strftime("%Y-%m-%d")
+            if ds in self.schedule_data and isinstance(self.schedule_data[ds], dict) and 'schedule' in self.schedule_data[ds]:
+                lines.append(f"- {WEEKDAY_CN[i]}: {self.schedule_data[ds]['schedule'][:50]}...")
+        return "\n".join(lines) if lines else "本周暂无记录"
+    
+    async def _daily_task(self):
+        logger.info("Running daily task...")
+        async with self.generation_lock:
+            await self._do_generate_daily(force=True)
+    
+    async def _weekly_task(self):
+        logger.info("Running weekly task...")
+        async with self.generation_lock:
+            await self._do_generate_week_plan()
+    
+    async def _do_generate_daily(self, date=None, force=False):
+        if date is None: date = datetime.datetime.now()
+        date_str = date.strftime("%Y-%m-%d")
+        if not force and date_str in self.schedule_data: return self.schedule_data[date_str]
         
-        # 1. 收集上下文
-        # 历史日程
-        history_schedules = []
+        persona = await self._get_persona()
+        weekday = WEEKDAY_CN[date.weekday()]
+        holiday = get_holiday_info(date.date())
+        city = self.config.weather.default_city or extract_city_from_persona(persona) or "北京"
+        weather = await self.weather_service.get_weather(city)
+        week_plan = self._get_week_plan()
+        today_key = WEEKDAY_NAMES[date.weekday()]
+        
+        history = []
         for i in range(1, self.config.reference_history_days + 1):
-            past_date = (today - datetime.timedelta(days=i)).strftime("%Y-%m-%d")
-            if past_date in self.schedule_data:
-                history_schedules.append(f"[{past_date}]: {self.schedule_data[past_date].get('schedule', '')[:100]}...")
-        history_schedules_str = "\n".join(history_schedules) if history_schedules else "无历史记录"
-
-        # 近期对话
-        recent_chats_str = ""
+            pd = (date - datetime.timedelta(days=i)).strftime("%Y-%m-%d")
+            if pd in self.schedule_data and isinstance(self.schedule_data[pd], dict):
+                history.append(f"[{pd}]: {self.schedule_data[pd].get('schedule', '')[:80]}...")
+        
+        recent_chats = "无"
         if self.config.reference_chats:
             chats = []
             for ref in self.config.reference_chats:
-                chat_content = await get_recent_chats(self.context, ref.umo, ref.count)
-                if chat_content:
-                    chats.append(f"--- 会话 {ref.umo} ---\n{chat_content}")
-            recent_chats_str = "\n".join(chats)
-        if not recent_chats_str:
-            recent_chats_str = "无近期对话"
-
-        # 2. 构造 Prompt
-        persona_desc = "你是一个充满活力、热爱生活、情感丰富的AI伙伴。"
+                c = await get_recent_chats(self.context, ref.umo, ref.count)
+                if c and c != "无": chats.append(c)
+            if chats: recent_chats = "\n".join(chats)
         
-        # 尝试从 PersonaManager 获取当前人设
-        if hasattr(self.context, "persona_manager"):
-            try:
-                persona = await self.context.persona_manager.get_default_persona_v3()
-                # 兼容 dict 访问和属性访问
-                if hasattr(persona, "get"):
-                    p_prompt = persona.get("prompt", "")
-                elif hasattr(persona, "prompt"):
-                    p_prompt = persona.prompt
-                else:
-                    p_prompt = ""
-                
-                if p_prompt:
-                    persona_desc = p_prompt
-            except Exception as e:
-                logger.warning(f"Failed to get persona from manager: {e}")
-
         prompt = self.config.prompt_template.format(
-            date_str=date_str,
-            weekday=weekday,
-            holiday=holiday,
-            persona_desc=persona_desc,
-            history_schedules=history_schedules_str,
-            recent_chats=recent_chats_str,
-            outfit_desc=self.config.outfit_desc
+            date_str=date.strftime("%Y年%m月%d日"), weekday=weekday, holiday=holiday, weather=weather,
+            persona_desc=persona, week_theme=week_plan.get('theme', '常规周'),
+            week_goals=', '.join(week_plan.get('goals', [])),
+            today_hint=week_plan.get('daily_hints', {}).get(today_key, '普通的一天'),
+            today_suggested=', '.join(week_plan.get('suggested_activities', {}).get(today_key, [])),
+            week_progress=self._get_week_progress(),
+            history_schedules="\n".join(history) if history else "无",
+            recent_chats=recent_chats, outfit_desc=self.config.outfit_desc
         )
-
+        
         try:
-            content = ""
             provider = self.context.get_using_provider()
             if not provider:
-                logger.error("No LLM provider available.")
+                logger.error("No LLM provider")
                 return None
-            
-            # session_id 必须是 str，如果没有特定会话，可以传空字符串或特定标识
-            # 使用特定 session_id 来隔离上下文
-            gen_session_id = "life_scheduler_gen"
-            try:
-                response = await provider.text_chat(prompt, session_id=gen_session_id)
-                content = response.completion_text
-                
-                # JSON 提取
-                json_data = extract_json_from_text(content)
-                if json_data:
-                    return json_data
-                else:
-                    logger.warning(f"LLM response not in JSON format or decoding failed: {content}")
-                    # Fallback
-                    return {"outfit": "日常休闲装", "schedule": content}
-            finally:
-                # 任务完成后，清理该临时会话的历史记录，防止上下文无限增长
-                try:
-                    # life_scheduler_gen 作为 UMO，会创建一个 Conversation
-                    cid = await self.context.conversation_manager.get_curr_conversation_id(gen_session_id)
-                    if cid:
-                        await self.context.conversation_manager.delete_conversation(gen_session_id, cid)
-                        logger.debug(f"Cleaned up temporary session: {gen_session_id}")
-                except Exception as cleanup_error:
-                    logger.warning(f"Failed to cleanup temporary session: {cleanup_error}")
-
+            resp = await provider.text_chat(prompt, session_id="life_scheduler_gen")
+            result = extract_json_from_text(resp.completion_text)
+            if result:
+                result["weather"] = weather
+                self.schedule_data[date_str] = result
+                await self._save_data()
+                logger.info(f"Generated schedule for {date_str}")
+                return result
+            else:
+                logger.error(f"Failed to parse JSON: {resp.completion_text[:200]}")
         except Exception as e:
-            logger.exception(f"Error calling LLM: {e}")
+            logger.error(f"Generate daily failed: {e}")
+        return None
+    
+    async def _do_generate_week_plan(self, template_id=None, goals=""):
+        if template_id is None: template_id = self.config.default_week_template
+        template = WEEK_TEMPLATES.get(template_id, WEEK_TEMPLATES["regular"])
+        week_id = get_week_id()
+        monday = get_monday_of_week()
+        sunday = monday + datetime.timedelta(days=6)
+        persona = await self._get_persona()
+        
+        prompt = f"""生成本周计划({monday.strftime("%m-%d")}至{sunday.strftime("%m-%d")})
+模板：{template['name']} - {template['description']}
+人设：{persona[:200]}
+目标：{goals if goals else '无特别指定'}
+返回JSON：{{"theme": "主题", "goals": ["目标"], "daily_hints": {{"monday": "...", "tuesday": "...", "wednesday": "...", "thursday": "...", "friday": "...", "saturday": "...", "sunday": "..."}}, "suggested_activities": {{"monday": ["活动"], "tuesday": ["活动"], "wednesday": ["活动"], "thursday": ["活动"], "friday": ["活动"], "saturday": ["活动"], "sunday": ["活动"]}}}}"""
+        
+        try:
+            provider = self.context.get_using_provider()
+            if not provider: return None
+            resp = await provider.text_chat(prompt, session_id="life_scheduler_week")
+            result = extract_json_from_text(resp.completion_text)
+            if not result:
+                result = {"theme": f"{template['emoji']} {template['name']}", "goals": ["按模板节奏"], "daily_hints": template["hints"], "suggested_activities": template["suggested_activities"]}
+            result["template_id"] = template_id
+            result["generated"] = True
+            if "week_plans" not in self.schedule_data: self.schedule_data["week_plans"] = {}
+            self.schedule_data["week_plans"][week_id] = result
+            await self._save_data()
+            logger.info(f"Generated week plan for {week_id}")
+            return result
+        except Exception as e:
+            logger.error(f"Generate week plan failed: {e}")
             return None
-
+    
+    def _get_time_status(self):
+        """获取时间段状态 [1]"""
+        hour = datetime.datetime.now().hour
+        if hour < 9:
+            return "刚开始"
+        elif hour >= 22:
+            return "即将结束"
+        else:
+            return "进行中"
+        
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
-        """System Prompt 注入 & 懒加载"""
-        # 防止无限递归：如果请求来自本插件的日程生成任务，直接忽略
-        if req.session_id == "life_scheduler_gen":
-            return
-
+        if req.session_id and req.session_id.startswith("life_scheduler"): return
         today_str = datetime.datetime.now().strftime("%Y-%m-%d")
-        
-        # Double-check locking pattern for lazy loading
         if today_str not in self.schedule_data and today_str not in self.failed_dates:
             async with self.generation_lock:
-                # Re-check inside lock
-                if today_str not in self.schedule_data and today_str not in self.failed_dates:
-                    logger.info(f"Lazy loading schedule for {today_str}...")
-                    schedule_info = await self.generate_schedule_with_llm()
-                    if schedule_info:
-                        async with self.data_lock:
-                            self.schedule_data[today_str] = schedule_info
-                        await self.save_data()
-                    else:
-                        logger.warning(f"Failed to lazy load schedule for {today_str}. Marking as failed to prevent infinite retries.")
-                        self.failed_dates.add(today_str)
-        
-        if today_str in self.schedule_data:
+                if today_str not in self.schedule_data:
+                    result = await self._do_generate_daily()
+                    if not result: self.failed_dates.add(today_str)
+        if today_str in self.schedule_data and isinstance(self.schedule_data[today_str], dict):
             info = self.schedule_data[today_str]
-            now_hour = datetime.datetime.now().hour
-            status = "进行中"
-            if now_hour < 9: status = "刚开始"
-            elif now_hour > 22: status = "即将结束"
-            
-            inject_text = f"\n[System Info]\n当前时段状态：{status}\n今日穿搭设定：{info.get('outfit')}\n今日日程安排：{info.get('schedule')}\n(请将以上信息作为你当前行为和状态的背景参考，无需刻意向用户汇报)"
-            req.system_prompt += inject_text
-
+            week_plan = self._get_week_plan()
+            inject = f"\n[System Info]\n天气：{info.get('weather', '未知')}\n穿搭：{info.get('outfit', '未设定')}\n日程：{info.get('schedule', '未设定')}\n本周：{week_plan.get('theme', '常规周')}"
+            req.system_prompt += inject
+    
     @filter.command("life")
     async def life_command(self, event: AstrMessageEvent, action: str = "", param: str = ""):
-        """
-        生活日程管理指令
-        /life show - 查看今日日程
-        /life regenerate - 重新生成今日日程
-        /life time [HH:MM] - 设置每日生成时间
-        """
         today_str = datetime.datetime.now().strftime("%Y-%m-%d")
-        umo = event.unified_msg_origin
         
-        result = None
-
+        if action in ["", "help"]:
+            yield event.plain_result("📅 生活日程管理\n/life show - 查看今日\n/life week - 查看周计划\n/life regenerate - 重新生成今日\n/life newweek [模板] [目标] - 生成新周计划\n/life templates - 查看模板\n/life weather [城市] - 查询天气\n/life history [天数] - 历史记录")
+            return
+        
         if action == "show":
-            info = self.schedule_data.get(today_str)
-            if info:
-                # 如果已有日程，直接返回日程信息字符串，让 AstrBot 处理发送
-                text_content = f"📅 {today_str}\n👗 今日穿搭：{info.get('outfit')}\n📝 日程安排：\n{info.get('schedule')}"
-                result = MessageEventResult().message(text_content)
+            if today_str in self.schedule_data and isinstance(self.schedule_data[today_str], dict):
+                info = self.schedule_data[today_str]
+                yield event.plain_result(f"📅 今日日程 ({today_str})\n\n🌤️ 天气：{info.get('weather', '未知')}\n\n👔 穿搭：{info.get('outfit', '未设定')}\n\n📋 日程：{info.get('schedule', '未设定')}")
             else:
-                # 尝试生成
-                await self.context.send_message(umo, MessageChain([Plain("今日尚未生成日程，正在为您生成...")]))
-                schedule_info = await self.generate_schedule_with_llm()
-                if schedule_info:
-                    async with self.data_lock:
-                        self.schedule_data[today_str] = schedule_info
-                    await self.save_data()
-                    text_content = f"📅 {today_str}\n👗 今日穿搭：{schedule_info.get('outfit')}\n📝 日程安排：\n{schedule_info.get('schedule')}"
-                    result = MessageEventResult().message(text_content)
-                else:
-                    result = MessageEventResult().message("生成失败，请检查日志。")
+                yield event.plain_result(f"今日 ({today_str}) 尚未生成日程。\n使用 /life regenerate 生成。")
+            return
         
-        elif action == "regenerate":
-            await self.context.send_message(umo, MessageChain([Plain("正在重新生成日程...")]))
-            schedule_info = await self.generate_schedule_with_llm()
-            if schedule_info:
-                async with self.data_lock:
-                    self.schedule_data[today_str] = schedule_info
-                await self.save_data()
-                text_content = f"📅 {today_str}\n👗 今日穿搭：{schedule_info.get('outfit')}\n📝 日程安排：\n{schedule_info.get('schedule')}"
-                result = MessageEventResult().message(text_content)
+        if action == "week":
+            plan = self._get_week_plan()
+            today_key = WEEKDAY_NAMES[datetime.datetime.now().weekday()]
+            result = f"📅 本周计划 ({get_week_id()})\n\n🎯 主题：{plan.get('theme', '未设定')}\n\n📌 目标：\n" + "\n".join([f"  • {g}" for g in plan.get('goals', [])])
+            result += f"\n\n📍 今日定位：{plan.get('daily_hints', {}).get(today_key, '无')}"
+            result += f"\n💡 建议活动：{', '.join(plan.get('suggested_activities', {}).get(today_key, []))}"
+            result += f"\n\n✅ 本周进度：\n{self._get_week_progress()}"
+            yield event.plain_result(result)
+            return
+        
+        if action == "templates":
+            lines = ["📚 可用周模板："]
+            for tid, t in WEEK_TEMPLATES.items():
+                lines.append(f"\n{t['emoji']} {tid}: {t['name']}\n   {t['description']}")
+            yield event.plain_result("\n".join(lines))
+            return
+        
+        if action == "newweek":
+            parts = param.split(" ", 1) if param else ["", ""]
+            template_id = parts[0] if parts[0] in WEEK_TEMPLATES else self.config.default_week_template
+            goals = parts[1] if len(parts) > 1 else ""
+            yield event.plain_result(f"正在生成周计划（模板: {template_id}）...")
+            async with self.generation_lock:
+                plan = await self._do_generate_week_plan(template_id, goals)
+            if plan:
+                yield event.plain_result(f"✅ 周计划已生成！\n\n🎯 主题：{plan.get('theme')}\n📌 目标：{', '.join(plan.get('goals', []))}")
             else:
-                result = MessageEventResult().message("生成失败，请检查日志。")
+                yield event.plain_result("❌ 生成失败")
+            return
         
-        elif action == "time":
-            if not param:
-                 result = MessageEventResult().message("请提供时间，格式为 HH:MM，例如 /life time 07:30")
-            
-            elif not re.match(r"^\d{2}:\d{2}$", param):
-                result = MessageEventResult().message("时间格式错误，请使用 HH:MM 格式。")
-            
+        if action == "regenerate":
+            yield event.plain_result("正在重新生成...")
+            async with self.generation_lock:
+                self.failed_dates.discard(today_str)
+                if today_str in self.schedule_data: del self.schedule_data[today_str]
+                result = await self._do_generate_daily(force=True)
+            if result:
+                yield event.plain_result(f"✅ 已重新生成！ ({today_str})\n\n🌤️ 天气：{result.get('weather', '未知')}\n\n👔 穿搭：{result.get('outfit', '未设定')}\n\n📋 日程：{result.get('schedule', '未设定')}")
             else:
-                try:
-                    self.scheduler.update_schedule_time(param)
-                    self.config.schedule_time = param
-                    await self.save_config()
-                    result = MessageEventResult().message(f"已将每日日程生成时间更新为 {param}。")
-                except Exception as e:
-                    result = MessageEventResult().message(f"设置失败: {e}")
-
-        else:
-            result = MessageEventResult().message(
-                "指令用法：\n"
-                "/life show - 查看日程\n"
-                "/life regenerate - 重新生成\n"
-                "/life time <HH:MM> - 设置生成时间"
-            )
+                yield event.plain_result("❌ 生成失败")
+            return
         
-        if result:
-            yield result
-
-    async def terminate(self):
-        """插件卸载时清理"""
-        self.scheduler.shutdown()
+        if action == "weather":
+            city = param.strip() if param else self.config.weather.default_city
+            if not city:
+                persona = await self._get_persona()
+                city = extract_city_from_persona(persona)
+            if not city:
+                yield event.plain_result("请指定城市：/life weather 北京")
+                return
+            weather = await self.weather_service.get_weather(city)
+            yield event.plain_result(f"🌤️ {weather}")
+            return
+        
+        if action == "history":
+            days = int(param) if param.isdigit() else 7
+            results = []
+            for i in range(days):
+                d = (datetime.datetime.now() - datetime.timedelta(days=i)).strftime("%Y-%m-%d")
+                if d in self.schedule_data and isinstance(self.schedule_data[d], dict):
+                    results.append(f"📅 {d}\n{self.schedule_data[d].get('schedule', '')[:80]}...")
+            yield event.plain_result("\n\n".join(results) if results else f"最近 {days} 天没有记录")
+            return
+        
+        yield event.plain_result("未知指令，使用 /life help 查看帮助")
