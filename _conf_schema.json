@@ -1,4 +1,3 @@
-
 {
   "schedule_time": {
     "type": "string",
@@ -14,6 +13,21 @@
     "type": "string",
     "description": "穿搭生成的提示词要求",
     "default": "今日穿搭描述（从里到外、从上到下、衣裤内衣裤鞋袜、饰品等，符合天气和心情）。"
+  },
+  "weather_api_key": {
+    "type": "string",
+    "description": "和风天气 API Key（控制台-项目管理中查看）",
+    "default": ""
+  },
+  "weather_api_host": {
+    "type": "string",
+    "description": "和风天气 API Host（如 devapi.qweather.com，不含 https://）",
+    "default": ""
+  },
+  "weather_default_city": {
+    "type": "string",
+    "description": "默认天气查询城市（留空则从人设自动提取）",
+    "default": ""
   },
   "reference_chats": {
     "type": "list",
@@ -35,10 +49,41 @@
     "description": "生成时参考的近期会话列表",
     "default": []
   },
+  "week_plan_enabled": {
+    "type": "bool",
+    "description": "是否启用智能周计划功能",
+    "default": true
+  },
+  "week_plan_day": {
+    "type": "string",
+    "description": "每周几自动生成周计划（monday/sunday，或留空禁用自动生成）",
+    "default": "monday"
+  },
+  "week_plan_time": {
+    "type": "string",
+    "description": "周计划自动生成时间 (HH:MM)",
+    "default": "06:00"
+  },
+  "default_week_template": {
+    "type": "string",
+    "description": "默认周模板 (regular/sprint/relax/social/recovery/holiday)",
+    "default": "regular"
+  },
+  "week_history_analysis_weeks": {
+    "type": "int",
+    "description": "周计划生成时分析的历史周数",
+    "default": 4
+  },
   "prompt_template": {
     "type": "string",
-    "description": "LLM 生成日程的完整 Prompt 模板",
+    "description": "每日日程生成的 Prompt 模板（支持周计划变量）",
     "hint": "textarea",
-    "default": "请根据以下信息，为自己生成一份今天的拟人化生活安排：\n日期：{date_str} {weekday} {holiday}\n人设：{persona_desc}\n参考历史日程：{history_schedules}\n参考近期对话：{recent_chats}\n\n请生成以下内容，并以 JSON 格式返回：\n1. outfit: {outfit_desc}\n2. schedule: 今日日程表（包含早中晚的关键活动，富有生活气息）。\n\n返回格式示例（仅返回 JSON）：\n{{\n    \"outfit\": \"...\",\n    \"schedule\": \"...\"\n}}\n"
+    "default": "# Role: Life Scheduler\n请根据以下信息，为自己规划一份今天的生活安排。请代入你的人设，生成的内容应富有生活气息，避免机械的流水账。\n\n## Context\n- 日期：{date_str} {weekday} {holiday}\n- 天气：{weather}\n- 人设：{persona_desc}\n\n## 本周计划（请围绕这个展开今日安排）\n- 本周主题：{week_theme}\n- 本周目标：{week_goals}\n- 今日定位：{today_hint}\n- 建议活动：{today_suggested}\n\n## 本周已完成进度\n{week_progress}\n\n## 近期对话记忆\n{recent_chats}\n\n## Tasks\n请生成以下内容，并以 JSON 格式返回：\n1. outfit: {outfit_desc}\n2. schedule: 规划今日日程（结合本周计划和今日定位）\n\n## Output Format\n请务必严格遵循 JSON 格式返回：\n{{\n    \"outfit\": \"...\",\n    \"schedule\": \"...\"\n}}\n"
+  },
+  "week_plan_prompt_template": {
+    "type": "string",
+    "description": "周计划生成的 Prompt 模板",
+    "hint": "textarea",
+    "default": "# Role: 智能周计划师\n\n你是一个贴心的生活规划助手，正在为用户生成下一周的生活计划。\n\n## 用户人设\n{persona_desc}\n\n## 本周信息\n- 日期范围：{week_start} 至 {week_end}\n- 选用模板：{template_name} - {template_desc}\n\n## 模板基础提示\n{template_hints}\n\n## 用户历史规律\n{history_patterns}\n\n## 特殊事件\n{special_events}\n\n## 用户指定目标\n{user_goals}\n\n## 任务\n请生成本周计划，要求：\n1. theme: 一句话概括本周基调\n2. goals: 本周想完成的1-3件事\n3. daily_hints: 周一到周日每天的简短定位\n4. suggested_activities: 每天推荐的具体活动\n\n## 输出格式（仅返回JSON）\n{{\n    \"theme\": \"本周主题\",\n    \"goals\": [\"目标1\", \"目标2\"],\n    \"daily_hints\": {{\n        \"monday\": \"...\",\n        \"tuesday\": \"...\",\n        \"wednesday\": \"...\",\n        \"thursday\": \"...\",\n        \"friday\": \"...\",\n        \"saturday\": \"...\",\n        \"sunday\": \"...\"\n    }},\n    \"suggested_activities\": {{\n        \"monday\": [\"活动1\", \"活动2\"],\n        \"tuesday\": [\"活动1\", \"活动2\"],\n        \"wednesday\": [\"活动1\", \"活动2\"],\n        \"thursday\": [\"活动1\", \"活动2\"],\n        \"friday\": [\"活动1\", \"活动2\"],\n        \"saturday\": [\"活动1\", \"活动2\"],\n        \"sunday\": [\"活动1\", \"活动2\"]\n    }}\n}}\n"
   }
 }
