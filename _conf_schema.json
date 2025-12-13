@@ -74,11 +74,37 @@
     "description": "周计划生成时分析的历史周数",
     "default": 4
   },
+  "date_enabled": {
+    "type": "bool",
+    "description": "是否启用约会功能（每日随机选择群成员作为约会对象）",
+    "default": false
+  },
+  "date_probability": {
+    "type": "float",
+    "description": "每日触发约会的概率 (0-1，例如 0.3 表示 30% 概率)",
+    "default": 0.3
+  },
+  "date_source_groups": {
+    "type": "list",
+    "items": {
+      "type": "int"
+    },
+    "description": "约会对象来源群号列表，如 [123456789, 987654321]",
+    "default": []
+  },
+  "date_exclude_users": {
+    "type": "list",
+    "items": {
+      "type": "int"
+    },
+    "description": "排除的用户QQ号列表（如机器人自己的QQ号）",
+    "default": []
+  },
   "prompt_template": {
     "type": "string",
-    "description": "每日日程生成的 Prompt 模板（支持周计划变量）",
+    "description": "每日日程生成的 Prompt 模板（支持周计划和约会变量）",
     "hint": "textarea",
-    "default": "# Role: Life Scheduler\n请根据以下信息，为自己规划一份今天的生活安排。请代入你的人设，生成的内容应富有生活气息，避免机械的流水账。\n\n## Context\n- 日期：{date_str} {weekday} {holiday}\n- 天气：{weather}\n- 人设：{persona_desc}\n\n## 本周计划（请围绕这个展开今日安排）\n- 本周主题：{week_theme}\n- 本周目标：{week_goals}\n- 今日定位：{today_hint}\n- 建议活动：{today_suggested}\n\n## 本周已完成进度\n{week_progress}\n\n## 近期对话记忆\n{recent_chats}\n\n## Tasks\n请生成以下内容，并以 JSON 格式返回：\n1. outfit: {outfit_desc}\n2. schedule: 规划今日日程（结合本周计划和今日定位）\n\n## Output Format\n请务必严格遵循 JSON 格式返回：\n{{\n    \"outfit\": \"...\",\n    \"schedule\": \"...\"\n}}\n"
+    "default": "# Role: Life Scheduler\n请根据以下信息，为自己规划一份今天的生活安排。请代入你的人设，生成的内容应富有生活气息，避免机械的流水账。\n\n## Context\n- 日期：{date_str} {weekday} {holiday}\n- 天气：{weather}\n- 人设：{persona_desc}\n\n## 本周计划（请围绕这个展开今日安排）\n- 本周主题：{week_theme}\n- 本周目标：{week_goals}\n- 今日定位：{today_hint}\n- 建议活动：{today_suggested}\n\n## 本周已完成进度\n{week_progress}\n\n## 今日约会\n{date_info}\n\n## 近期对话记忆\n{recent_chats}\n\n## Tasks\n请生成以下内容，并以 JSON 格式返回：\n1. outfit: {outfit_desc}\n2. schedule: 规划今日日程（结合本周计划、今日定位和约会安排）\n\n## Output Format\n请务必严格遵循 JSON 格式返回：\n{{\n    \"outfit\": \"...\",\n    \"schedule\": \"...\"\n}}\n"
   },
   "week_plan_prompt_template": {
     "type": "string",
