@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import random
 import datetime
 import asyncio
 import aiohttp
@@ -21,7 +22,6 @@ from astrbot.core.provider.entities import ProviderRequest
 
 WEEKDAY_NAMES = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
 WEEKDAY_CN = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
-
 WEEK_TEMPLATES = {
     "regular": {"name": "常规周", "emoji": "📊", "description": "普通的一周",
         "hints": {"monday": "新的一周开始", "tuesday": "进入状态", "wednesday": "周中保持节奏", "thursday": "继续推进", "friday": "收尾工作", "saturday": "自由安排", "sunday": "休息充电"},
@@ -62,11 +62,34 @@ class WeatherConfig:
         return WeatherConfig(api_key=str(data.get("api_key", "")), api_host=str(data.get("api_host", "")), default_city=str(data.get("default_city", "")))
 
 @dataclass
+class DateConfig:
+    """约会功能配置"""
+    enabled: bool = False
+    probability: float = 0.3
+    source_groups: List[int] = field(default_factory=list)
+    exclude_users: List[int] = field(default_factory=list)  # 排除的用户列表
+    
+    @staticmethod
+    def from_dict(data):
+        if not isinstance(data, dict): return DateConfig()
+        config = DateConfig()
+        config.enabled = data.get("date_enabled", False)
+        config.probability = data.get("date_probability", 0.3)
+        groups = data.get("date_source_groups", [])
+        if isinstance(groups, list):
+            config.source_groups = [int(g) for g in groups if str(g).isdigit()]
+        exclude = data.get("date_exclude_users", [])
+        if isinstance(exclude, list):
+            config.exclude_users = [int(u) for u in exclude if str(u).isdigit()]
+        return config
+
+@dataclass
 class SchedulerConfig:
     schedule_time: str = "07:00"
     reference_history_days: int = 3
     reference_chats: List[ChatReference] = field(default_factory=list)
     weather: WeatherConfig = field(default_factory=WeatherConfig)
+    date: DateConfig = field(default_factory=DateConfig)  # 新增约会配置
     week_plan_enabled: bool = True
     week_plan_day: str = "monday"
     week_plan_time: str = "06:00"
@@ -83,6 +106,7 @@ class SchedulerConfig:
 - 本周进度：{week_progress}
 - 历史日程：{history_schedules}
 - 近期对话：{recent_chats}
+- 今日约会：{date_info}
 请生成JSON：{{"outfit": "今日穿搭", "schedule": "今日日程"}}
 """
     outfit_desc: str = "今日穿搭描述"
@@ -97,6 +121,7 @@ class SchedulerConfig:
         if isinstance(refs, list):
             config.reference_chats = [ChatReference.from_dict(r) for r in refs if isinstance(r, dict)]
         config.weather = WeatherConfig(api_key=str(data.get("weather_api_key", "")), api_host=str(data.get("weather_api_host", "")), default_city=str(data.get("weather_default_city", "")))
+        config.date = DateConfig.from_dict(data)  # 解析约会配置
         config.week_plan_enabled = data.get("week_plan_enabled", True)
         config.week_plan_day = data.get("week_plan_day", "monday")
         config.week_plan_time = data.get("week_plan_time", "06:00")
@@ -150,6 +175,7 @@ def get_holiday_info(date):
         return f"今天是 {h}" if h else ""
     except: return ""
 
+
 class WeatherService:
     def __init__(self, config):
         self.config = config
@@ -182,7 +208,125 @@ class WeatherService:
                 return f"{city}: {n.get('text', '?')}, {n.get('temp', '?')}°C"
         except Exception as e: return f"天气查询失败: {e}"
 
-@register("life_scheduler", "Assistant", "生活日程管理插件", "2.0.0", "repo")
+
+class DateService:
+    """约会服务 - 通过 event.bot 获取群成员列表"""
+    
+    def __init__(self, config: DateConfig, data_path: Path):
+        self.config = config
+        self.cache_file = data_path / "date_cache.json"
+        self._last_event = None  # 缓存最近的事件对象
+    
+    def set_event(self, event: AstrMessageEvent):
+        """缓存事件对象，用于后续 API 调用"""
+        self._last_event = event
+    
+    async def get_group_member_list(self, group_id: int) -> list:
+        """通过 event.bot 获取群成员列表（无需配置 HTTP URL）"""
+        if self._last_event is None:
+            logger.warning("[DateService] 没有可用的事件对象")
+            return []
+        
+        try:
+            from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
+            if isinstance(self._last_event, AiocqhttpMessageEvent):
+                client = self._last_event.bot
+                members = await client.get_group_member_list(group_id=group_id)
+                logger.info(f"[DateService] 成功获取群 {group_id} 成员列表，共 {len(members)} 人")
+                return members
+            else:
+                logger.warning(f"[DateService] 事件类型不支持: {type(self._last_event)}")
+        except Exception as e:
+            logger.error(f"[DateService] 获取群成员列表失败: {e}")
+        return []
+    
+    def _load_cache(self) -> dict | None:
+        """加载今日约会缓存"""
+        try:
+            if self.cache_file.exists():
+                with open(self.cache_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if data.get("date") == datetime.datetime.now().strftime("%Y-%m-%d"):
+                        return data
+        except Exception as e:
+            logger.error(f"[DateService] 加载缓存失败: {e}")
+        return None
+    
+    def _save_cache(self, partner: dict):
+        """保存约会缓存"""
+        try:
+            self.cache_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.cache_file, "w", encoding="utf-8") as f:
+                json.dump(partner, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"[DateService] 保存缓存失败: {e}")
+    
+    async def select_date_partner(self, force: bool = False, ignore_probability: bool = False) -> dict | None:
+        """选择今日约会对象"""
+        if not self.config.enabled:
+            logger.debug("[DateService] 约会功能未启用")
+            return None
+        
+        # 检查缓存
+        if not force:
+            cached = self._load_cache()
+            if cached:
+                logger.info(f"[DateService] 使用缓存的约会对象: {cached.get('nickname')}")
+                return cached
+        
+        if not self.config.source_groups:
+            logger.warning("[DateService] 未配置 date_source_groups")
+            return None
+        
+        # 概率检查
+        if not ignore_probability and random.random() > self.config.probability:
+            logger.info(f"[DateService] 今日未触发约会（概率 {self.config.probability} 未命中）")
+            return None
+        
+        # 收集所有群成员
+        all_members = []
+        for group_id in self.config.source_groups:
+            members = await self.get_group_member_list(int(group_id))
+            for member in members:
+                user_id = member.get("user_id")
+                # 排除指定用户
+                if user_id and user_id not in self.config.exclude_users:
+                    member['source_group'] = group_id
+                    all_members.append(member)
+        
+        if not all_members:
+            logger.warning("[DateService] 无法获取任何群成员")
+            return None
+        
+        # 随机选择
+        partner = random.choice(all_members)
+        result = {
+            "user_id": partner.get("user_id"),
+            "nickname": partner.get("nickname", "未知"),
+            "card": partner.get("card", ""),  # 群名片
+            "source_group": partner.get("source_group"),
+            "date": datetime.datetime.now().strftime("%Y-%m-%d")
+        }
+        
+        self._save_cache(result)
+        display_name = result["card"] or result["nickname"]
+        logger.info(f"[DateService] 今日约会对象: {display_name} ({result['user_id']})")
+        return result
+    
+    def get_today_date_info(self) -> str:
+        """获取今日约会信息字符串"""
+        cached = self._load_cache()
+        if cached:
+            display_name = cached.get("card") or cached.get("nickname", "未知")
+            return f"今天和 {display_name} (QQ：{user_id}) 有约会"
+        return "今天没有约会安排"
+    
+    def get_today_date_detail(self) -> dict | None:
+        """获取今日约会详细信息"""
+        return self._load_cache()
+
+
+@register("life_scheduler", "Assistant", "生活日程管理插件（含约会功能）", "2.1.0", "repo")
 class Main(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -195,9 +339,10 @@ class Main(Star):
         self.config = SchedulerConfig.from_dict(config)
         self.schedule_data = self._load_data_sync()
         self.weather_service = WeatherService(self.config.weather)
+        self.date_service = DateService(self.config.date, self.base_dir)  # 初始化约会服务
         self.scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
         self._setup_scheduler()
-        logger.info("[LifeScheduler] Initialized")
+        logger.info("[LifeScheduler] Initialized with date feature")
     
     def _setup_scheduler(self):
         try:
@@ -278,6 +423,9 @@ class Main(Star):
         week_plan = self._get_week_plan()
         today_key = WEEKDAY_NAMES[date.weekday()]
         
+        # 获取约会信息
+        date_info = self.date_service.get_today_date_info()
+        
         history = []
         for i in range(1, self.config.reference_history_days + 1):
             pd = (date - datetime.timedelta(days=i)).strftime("%Y-%m-%d")
@@ -300,7 +448,9 @@ class Main(Star):
             today_suggested=', '.join(week_plan.get('suggested_activities', {}).get(today_key, [])),
             week_progress=self._get_week_progress(),
             history_schedules="\n".join(history) if history else "无",
-            recent_chats=recent_chats, outfit_desc=self.config.outfit_desc
+            recent_chats=recent_chats, outfit_desc=self.config.outfit_desc,
+            date_info=date_info,  # 新增约会信息
+            date_partner_hint=date_info  # 添加这行，兼容旧配置
         )
         
         try:
@@ -312,6 +462,7 @@ class Main(Star):
             result = extract_json_from_text(resp.completion_text)
             if result:
                 result["weather"] = weather
+                result["date_partner"] = self.date_service.get_today_date_detail()  # 保存约会信息
                 self.schedule_data[date_str] = result
                 await self._save_data()
                 logger.info(f"Generated schedule for {date_str}")
@@ -355,42 +506,126 @@ class Main(Star):
             return None
     
     def _get_time_status(self):
-        """获取时间段状态 [1]"""
+        """获取时间段状态"""
         hour = datetime.datetime.now().hour
-        if hour < 9:
-            return "刚开始"
-        elif hour >= 22:
-            return "即将结束"
-        else:
-            return "进行中"
-        
+        if hour < 9: return "刚开始"
+        elif hour >= 22: return "即将结束"
+        else: return "进行中"
+    
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
+        # 缓存事件对象供约会服务使用
+        self.date_service.set_event(event)
+        
         if req.session_id and req.session_id.startswith("life_scheduler"): return
         today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+        
+        # 尝试选择今日约会对象（如果启用且未选择）
+        if self.config.date.enabled:
+            await self.date_service.select_date_partner()
+        
         if today_str not in self.schedule_data and today_str not in self.failed_dates:
             async with self.generation_lock:
                 if today_str not in self.schedule_data:
                     result = await self._do_generate_daily()
                     if not result: self.failed_dates.add(today_str)
+        
         if today_str in self.schedule_data and isinstance(self.schedule_data[today_str], dict):
             info = self.schedule_data[today_str]
             week_plan = self._get_week_plan()
-            inject = f"\n[System Info]\n天气：{info.get('weather', '未知')}\n穿搭：{info.get('outfit', '未设定')}\n日程：{info.get('schedule', '未设定')}\n本周：{week_plan.get('theme', '常规周')}"
+            date_info = self.date_service.get_today_date_info()
+            time_status = self._get_time_status()
+            inject = f"\n[今日生活状态 ({time_status})]\n天气：{info.get('weather', '未知')}\n穿搭：{info.get('outfit', '未设定')}\n日程：{info.get('schedule', '未设定')}\n本周：{week_plan.get('theme', '常规周')}\n约会：{date_info}"
             req.system_prompt += inject
     
     @filter.command("life")
     async def life_command(self, event: AstrMessageEvent, action: str = "", param: str = ""):
+        # 缓存事件对象
+        self.date_service.set_event(event)
         today_str = datetime.datetime.now().strftime("%Y-%m-%d")
         
         if action in ["", "help"]:
-            yield event.plain_result("📅 生活日程管理\n/life show - 查看今日\n/life week - 查看周计划\n/life regenerate - 重新生成今日\n/life newweek [模板] [目标] - 生成新周计划\n/life templates - 查看模板\n/life weather [城市] - 查询天气\n/life history [天数] - 历史记录")
+            yield event.plain_result(
+                "📅 生活日程管理\n"
+                "/life show - 查看今日\n"
+                "/life week - 查看周计划\n"
+                "/life regenerate - 重新生成今日\n"
+                "/life newweek [模板] [目标] - 生成新周计划\n"
+                "/life templates - 查看模板\n"
+                "/life weather [城市] - 查询天气\n"
+                "/life history [天数] - 历史记录\n"
+                "/life date - 查看今日约会\n"
+                "/life date test - 测试约会功能\n"
+                "/life date force - 强制重选约会对象"
+            )
             return
         
+        # ========== 约会相关命令 ==========
+        if action == "date":
+            if param == "test":
+                yield event.plain_result("正在测试约会选择功能...")
+                partner = await self.date_service.select_date_partner(force=True, ignore_probability=True)
+                if partner:
+                    display_name = partner.get("card") or partner.get("nickname")
+                    result = (
+                        f"✅ 约会选择测试成功！\n\n"
+                        f"👤 约会对象: {display_name}\n"
+                        f"🆔 QQ号: {partner.get('user_id')}\n"
+                        f"📍 来源群: {partner.get('source_group')}\n"
+                        f"📅 日期: {partner.get('date')}"
+                    )
+                else:
+                    result = (
+                        "❌ 约会选择测试失败！\n\n"
+                        "请检查：\n"
+                        "1. date_enabled 是否为 true\n"
+                        "2. date_source_groups 是否配置了群号\n"
+                        "3. Bot 是否在配置的群中"
+                    )
+                yield event.plain_result(result)
+                return
+            
+            elif param == "force":
+                yield event.plain_result("正在重新选择约会对象...")
+                partner = await self.date_service.select_date_partner(force=True, ignore_probability=True)
+                if partner:
+                    display_name = partner.get("card") or partner.get("nickname")
+                    yield event.plain_result(f"✅ 已重新选择约会对象: {display_name} ({partner.get('user_id')})")
+                else:
+                    yield event.plain_result("❌ 选择失败，请检查配置")
+                return
+            
+            else:
+                # 显示今日约会信息
+                partner = self.date_service.get_today_date_detail()
+                if partner:
+                    display_name = partner.get("card") or partner.get("nickname")
+                    result = (
+                        f"💕 今日约会\n\n"
+                        f"👤 对象: {display_name}\n"
+                        f"🆔 QQ: {partner.get('user_id')}\n"
+                        f"📍 来源群: {partner.get('source_group')}"
+                    )
+                else:
+                    if not self.config.date.enabled:
+                        result = "❌ 约会功能未启用\n请在配置中设置 date_enabled = true"
+                    else:
+                        result = "今天没有约会安排 💤"
+                yield event.plain_result(result)
+                return
+        
+        # ========== 原有命令 ==========
         if action == "show":
             if today_str in self.schedule_data and isinstance(self.schedule_data[today_str], dict):
                 info = self.schedule_data[today_str]
-                yield event.plain_result(f"📅 今日日程 ({today_str})\n\n🌤️ 天气：{info.get('weather', '未知')}\n\n👔 穿搭：{info.get('outfit', '未设定')}\n\n📋 日程：{info.get('schedule', '未设定')}")
+                date_info = self.date_service.get_today_date_info()
+                yield event.plain_result(
+                    f"📅 今日日程 ({today_str})\n\n"
+                    f"🌤️ 天气：{info.get('weather', '未知')}\n\n"
+                    f"👔 穿搭：{info.get('outfit', '未设定')}\n\n"
+                    f"📋 日程：{info.get('schedule', '未设定')}\n\n"
+                    f"💕 约会：{date_info}"
+                )
             else:
                 yield event.plain_result(f"今日 ({today_str}) 尚未生成日程。\n使用 /life regenerate 生成。")
             return
@@ -430,9 +665,21 @@ class Main(Star):
             async with self.generation_lock:
                 self.failed_dates.discard(today_str)
                 if today_str in self.schedule_data: del self.schedule_data[today_str]
+        
+                # ✅ 添加这行：强制重新选择约会对象
+                if self.config.date.enabled:
+                    await self.date_service.select_date_partner(force=True, ignore_probability=True)
+        
                 result = await self._do_generate_daily(force=True)
             if result:
-                yield event.plain_result(f"✅ 已重新生成！ ({today_str})\n\n🌤️ 天气：{result.get('weather', '未知')}\n\n👔 穿搭：{result.get('outfit', '未设定')}\n\n📋 日程：{result.get('schedule', '未设定')}")
+                date_info = self.date_service.get_today_date_info()
+                yield event.plain_result(
+                    f"✅ 已重新生成！ ({today_str})\n\n"
+                    f"🌤️ 天气：{result.get('weather', '未知')}\n\n"
+                    f"👔 穿搭：{result.get('outfit', '未设定')}\n\n"
+                    f"📋 日程：{result.get('schedule', '未设定')}\n\n"
+                    f"💕 约会：{date_info}"
+                )
             else:
                 yield event.plain_result("❌ 生成失败")
             return
