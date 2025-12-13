@@ -400,7 +400,7 @@ class Main(Star):
             today_key = WEEKDAY_NAMES[datetime.datetime.now().weekday()]
             result = f"📅 本周计划 ({get_week_id()})\n\n🎯 主题：{plan.get('theme', '未设定')}\n\n📌 目标：\n" + "\n".join([f"  • {g}" for g in plan.get('goals', [])])
             result += f"\n\n📍 今日定位：{plan.get('daily_hints', {}).get(today_key, '无')}"
-            result += f"\n💡 建议活动：{', '.join(plan.get('suggested_activities', {}).get(today_key, []))}"
+            result += f"\n\n💡 建议活动：{', '.join(plan.get('suggested_activities', {}).get(today_key, []))}"
             result += f"\n\n✅ 本周进度：\n{self._get_week_progress()}"
             yield event.plain_result(result)
             return
