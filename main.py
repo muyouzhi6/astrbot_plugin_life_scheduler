@@ -318,6 +318,7 @@ class DateService:
         cached = self._load_cache()
         if cached:
             display_name = cached.get("card") or cached.get("nickname", "未知")
+            user_id = cached.get("user_id", "")
             return f"今天和 {display_name} (QQ：{user_id}) 有约会"
         return "今天没有约会安排"
     
