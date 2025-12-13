@@ -100,6 +100,26 @@
     "description": "排除的用户QQ号列表（如机器人自己的QQ号）",
     "default": []
   },
+  "date_active_only": {
+    "type": "bool",
+    "description": "是否只从活跃成员中选择约会对象（基于最后发言时间筛选）",
+    "default": false
+  },
+  "date_active_days": {
+    "type": "int",
+    "description": "活跃天数阈值（N天内发过言视为活跃成员）",
+    "default": 7
+  },
+  "date_include_new_members": {
+    "type": "bool",
+    "description": "是否包含新成员（入群时间较短但未发言的成员也视为活跃）",
+    "default": true
+  },
+  "date_new_member_days": {
+    "type": "int",
+    "description": "新成员天数阈值（入群N天内视为新成员）",
+    "default": 3
+  },
   "prompt_template": {
     "type": "string",
     "description": "每日日程生成的 Prompt 模板（支持周计划和约会变量）",
