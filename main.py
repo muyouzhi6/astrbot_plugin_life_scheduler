@@ -41,9 +41,12 @@ class LifeSchedulerPlugin(Star):
         """System Prompt 注入"""
         today = datetime.datetime.now()
         umo = event.unified_msg_origin
-        data = self.data_mgr.get(today) or await self.generator.generate_schedule(
-            today, umo
-        )
+        data = self.data_mgr.get(today)
+        if not data:
+            try:
+                data = await self.generator.generate_schedule(today, umo)
+            except RuntimeError:
+                return
         if data.status == "failed":
             return
 
@@ -73,9 +76,12 @@ class LifeSchedulerPlugin(Star):
 
         data = self.data_mgr.get(today)
         if not data:
-            yield event.plain_result("今日还没日程，正在生成...")
-            data = await self.generator.generate_schedule(today, umo)
-
+            try:
+                yield event.plain_result("今日还没日程，正在生成...")
+                data = await self.generator.generate_schedule(today, umo)
+            except RuntimeError:
+                yield event.plain_result("日程正在生成中，请稍后再查看")
+                return
         yield event.plain_result(
             f"📅 {today_str}\n👗 今日穿搭：{data.outfit}\n📝 日程安排：\n{data.schedule}"
         )
@@ -87,7 +93,11 @@ class LifeSchedulerPlugin(Star):
         today_str = today.strftime("%Y-%m-%d")
         umo = event.unified_msg_origin
         yield event.plain_result("正在重写今日日程...")
-        data = await self.generator.generate_schedule(today, umo)
+        try:
+            data = await self.generator.generate_schedule(today, umo)
+        except RuntimeError:
+            yield event.plain_result("已有日程生成任务在进行中，请稍后再试")
+            return
         yield event.plain_result(
             f"📅 {today_str}"
             f"\n👗 今日穿搭：{data.outfit}"

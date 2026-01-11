@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import json
 import random
@@ -36,9 +37,18 @@ class SchedulerGenerator:
         self.config = config
         self.data_mgr = data_mgr
 
+        self._gen_lock = asyncio.Lock()
+        self._generating = False
+
     async def generate_schedule(
         self, date: datetime.datetime | None = None, umo: str | None = None
     ) -> ScheduleData:
+        async with self._gen_lock:
+            if self._generating:
+                raise RuntimeError("schedule_generating")
+            self._generating = True
+
+        data: ScheduleData | None = None
         date = date or datetime.datetime.now()
         date_str = date.strftime("%Y-%m-%d")
         try:
@@ -58,7 +68,10 @@ class SchedulerGenerator:
                 date=date_str, outfit="生成失败", schedule="生成失败", status="failed"
             )
         finally:
-            self.data_mgr.set(data)
+            async with self._gen_lock:
+                self._generating = False
+            if data:
+                self.data_mgr.set(data)
 
     # ---------- context ----------
 
