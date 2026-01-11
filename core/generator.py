@@ -42,11 +42,15 @@ class SchedulerGenerator:
         date = date or datetime.datetime.now()
         date_str = date.strftime("%Y-%m-%d")
         try:
+            logger.info(f"正在生成 {date_str} 的日程...")
             ctx = await self._collect_context(date, umo)
             prompt = self._build_prompt(ctx)
             content = await self._call_llm(prompt)
             data = self._parse_result(content, date_str)
             self.data_mgr.set(data)
+            logger.info(
+                f"日程生成成功: {json.dumps(asdict(data), ensure_ascii=False, indent=2)}"
+            )
             return data
         except Exception as e:
             logger.error(f"日程生成失败: {e}")

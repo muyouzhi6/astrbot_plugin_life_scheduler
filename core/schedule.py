@@ -1,6 +1,7 @@
 import zoneinfo
 from collections.abc import Awaitable, Callable
 
+from apscheduler.executors.asyncio import AsyncIOExecutor
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from astrbot.api import logger
@@ -8,6 +9,7 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.star.context import Context
 
 TaskCallable = Callable[[], Awaitable[object | None]]
+
 
 class LifeScheduler:
     def __init__(
@@ -22,7 +24,15 @@ class LifeScheduler:
         self.timezone = (
             zoneinfo.ZoneInfo(tz) if tz else zoneinfo.ZoneInfo("Asia/Shanghai")
         )
-        self.scheduler = AsyncIOScheduler(timezone=self.timezone)
+        self.scheduler = AsyncIOScheduler(
+            timezone=self.timezone,
+            executors={"default": AsyncIOExecutor()},
+            job_defaults={
+                "coalesce": True,
+                "max_instances": 1,
+                "misfire_grace_time": 120,
+            },
+        )
         self.job = None
 
     def start(self):
@@ -37,9 +47,9 @@ class LifeScheduler:
                 id="daily_schedule_gen",
             )
             self.scheduler.start()
-            logger.info(f"Life Scheduler started at {schedule_time}")
+            logger.info(f"生活调度器已启动，时间：{schedule_time}")
         except Exception as e:
-            logger.error(f"Failed to setup scheduler: {e}")
+            logger.error(f"调度器初始化失败：{e}")
 
     def stop(self):
         if self.scheduler.running:
@@ -55,6 +65,6 @@ class LifeScheduler:
             self.config.save_config()
             if self.job:
                 self.job.reschedule("cron", hour=hour, minute=minute)
-                logger.info(f"Life Scheduler rescheduled to {hour}:{minute}")
+                logger.info(f"生活调度器已重新排程至 {hour}:{minute}")
         except Exception as e:
-            logger.error(f"Failed to update scheduler: {e}")
+            logger.error(f"更新调度器失败：{e}")

@@ -38,11 +38,7 @@ class LifeSchedulerPlugin(Star):
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
-        """System Prompt 注入 & 懒加载"""
-        # 防止无限递归：如果请求来自本插件的日程生成任务，直接忽略
-        if req.session_id == "life_scheduler_gen":
-            return
-
+        """System Prompt 注入"""
         today = datetime.datetime.now()
         umo = event.unified_msg_origin
         data = self.data_mgr.get(today) or await self.generator.generate_schedule(
@@ -123,8 +119,6 @@ class LifeSchedulerPlugin(Star):
 
         try:
             self.scheduler.update_schedule_time(param)
-            self.config["schedule_time"] = param
-            self.config.save_config()
             yield event.plain_result(f"已将每日日程生成时间更新为 {param}。")
         except Exception as e:
             yield event.plain_result(f"设置失败: {e}")
