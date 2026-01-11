@@ -16,18 +16,19 @@ class LifeScheduler:
         config: AstrBotConfig,
         task: TaskCallable,
     ):
+        self.config = config
         self.task = task
         tz = context.get_config().get("timezone")
         self.timezone = (
             zoneinfo.ZoneInfo(tz) if tz else zoneinfo.ZoneInfo("Asia/Shanghai")
         )
         self.scheduler = AsyncIOScheduler(timezone=self.timezone)
-        self.schedule_time = config["schedule_time"]
         self.job = None
 
     def start(self):
         try:
-            hour, minute = map(int, self.schedule_time.split(":"))
+            schedule_time = self.config["schedule_time"]
+            hour, minute = map(int, schedule_time.split(":"))
             self.job = self.scheduler.add_job(
                 self.task,
                 "cron",
@@ -36,7 +37,7 @@ class LifeScheduler:
                 id="daily_schedule_gen",
             )
             self.scheduler.start()
-            logger.info(f"Life Scheduler started at {self.schedule_time}")
+            logger.info(f"Life Scheduler started at {schedule_time}")
         except Exception as e:
             logger.error(f"Failed to setup scheduler: {e}")
 
@@ -45,12 +46,13 @@ class LifeScheduler:
             self.scheduler.shutdown()
 
     def update_schedule_time(self, new_time: str):
-        if new_time == self.schedule_time:
+        if new_time == self.config["schedule_time"]:
             return
 
         try:
-            hour, minute = map(int, self.schedule_time.split(":"))
-            self.schedule_time = new_time
+            hour, minute = map(int, new_time.split(":"))
+            self.config["schedule_time"] = new_time
+            self.config.save_config()
             if self.job:
                 self.job.reschedule("cron", hour=hour, minute=minute)
                 logger.info(f"Life Scheduler rescheduled to {hour}:{minute}")

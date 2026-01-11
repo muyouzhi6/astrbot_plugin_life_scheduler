@@ -17,6 +17,7 @@ class ScheduleContext:
     weekday: str
     holiday: str
     persona_desc: str
+    outfit_desc: str
     history_schedules: str
     recent_chats: str
     daily_theme: str
@@ -60,6 +61,7 @@ class SchedulerGenerator:
             weekday=self._weekday(data),
             holiday=self._get_holiday_info(data.date()),
             persona_desc=await self._get_persona(),
+            outfit_desc=self.config["outfit_desc"],
             history_schedules=self._get_history(data),
             recent_chats=await self._get_recent_chats(umo),
             **self._pick_diversity(),
@@ -118,7 +120,7 @@ class SchedulerGenerator:
         self, umo: str | None = None, count: int | None = None
     ) -> str:
         """获取指定会话的最近聊天记录"""
-        count = count or self.config["reference_count"]
+        count = count or self.config["reference_recent_count"]
 
         if not umo or not count:
             return "无近期对话"

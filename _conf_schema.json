@@ -15,9 +15,9 @@
     },
     "default": 3
   },
-  "reference_count": {
+  "reference_recent_count": {
     "description": "生成时参考的近期会话数量",
-    "hint": "bot会从最近的会话中爬取聊天记录来辅助日程的生成。",
+    "hint": "bot会从最近的会话中爬取聊天记录来辅助日程的生成",
     "type": "int",
     "slider": {
       "min": 10,
@@ -110,6 +110,7 @@
   },
   "outfit_desc": {
     "description": "穿搭生成的提示词要求",
+    "hint":"此处提示词会并入生成日程的 Prompt 模板",
     "type": "text",
     "default": "今日穿搭描述（从里到外、从上到下、衣裤内衣裤鞋袜、饰品等，符合天气和心情）。"
   },

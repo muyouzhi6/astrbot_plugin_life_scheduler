@@ -20,9 +20,10 @@ class LifeSchedulerPlugin(Star):
         self.context = context
         self.config = config
         self.data_dir = StarTools.get_data_dir()
+        self.schedule_data_file = self.data_dir / "schedule_data.json"
 
     async def initialize(self):
-        self.data_mgr = ScheduleDataManager()
+        self.data_mgr = ScheduleDataManager(self.schedule_data_file)
         self.generator = SchedulerGenerator(self.context, self.config, self.data_mgr)
         self.scheduler = LifeScheduler(
             context=self.context,
@@ -43,11 +44,11 @@ class LifeSchedulerPlugin(Star):
             return
 
         today = datetime.datetime.now()
-
-        data: ScheduleData = (
-            self.data_mgr.get(today) or await self.generator.generate_schedule()
-        )
-        if data.status == "fail":
+        umo = event.unified_msg_origin
+        data: ScheduleData = self.data_mgr.get(
+            today
+        ) or await self.generator.generate_schedule(today, umo)
+        if data.status == "failed":
             return
 
         # 使用更隐晦的方式注入，强调这是内心状态而非需要表达的信息
@@ -82,9 +83,12 @@ class LifeSchedulerPlugin(Star):
         """
         today = datetime.datetime.now()
         today_str = today.strftime("%Y-%m-%d")
+        umo = event.unified_msg_origin
         match action:
             case "show":
-                data = self.data_mgr.get(today) or await self.generator.generate_schedule()
+                data = self.data_mgr.get(
+                    today
+                ) or await self.generator.generate_schedule(today, umo)
                 if not data:
                     yield event.plain_result("今日尚未生成日程，生成失败")
                     return
@@ -95,7 +99,7 @@ class LifeSchedulerPlugin(Star):
 
             case "regenerate":
                 yield event.plain_result("正在重新生成今日日程...")
-                data = await self.generator.generate_schedule()
+                data = await self.generator.generate_schedule(today, umo)
                 if not data:
                     yield event.plain_result("重新生成失败，请查看日志")
                     return
