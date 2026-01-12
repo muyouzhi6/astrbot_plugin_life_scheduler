@@ -110,6 +110,7 @@
   },
   "prompt_template": {
     "description": "LLM 生成日程的完整 Prompt 模板",
+    "hint":"插件内部支持格式化的占位符有： {date_str}、{weekday}、{holiday}、{persona_desc}、{daily_theme}、{mood_color}、{outfit_style}、{schedule_type}、{history_schedules}、{recent_chats}，其他占位符默认会被替换为空字符串",
     "type": "text",
     "obvious_hint": true,
     "editor_mode": true,
