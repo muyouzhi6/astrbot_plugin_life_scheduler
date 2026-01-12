@@ -86,6 +86,7 @@ class LifeSchedulerPlugin(Star):
             f"📅 {today_str}\n👗 今日穿搭：{data.outfit}\n📝 日程安排：\n{data.schedule}"
         )
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("重写日程", alias={"life renew"})
     async def life_renew(self, event: AstrMessageEvent):
         """重写今日的日程"""
@@ -102,6 +103,7 @@ class LifeSchedulerPlugin(Star):
             f"📅 {today_str}\n👗 今日穿搭：{data.outfit}\n📝 日程安排：{data.schedule}"
         )
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("日程时间", alias={"life time"})
     async def life_time(self, event: AstrMessageEvent, param: str | None = None):
         """日程时间 [HH:MM] ，设置每日日程生成时间"""
