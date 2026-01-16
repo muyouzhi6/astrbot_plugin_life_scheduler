@@ -94,3 +94,7 @@ pip install -r requirements.txt
 
 1. **Token 消耗**: 每日生成日程会调用一次 LLM，消耗一定的 Token。配置的参考历史天数和聊天记录越多，消耗越大。
 2. **依赖安装**: 务必确保安装了 `holidays` 库，否则节日判断功能将失效（默认为中国节日）。
+
+本插件开发QQ群：215532038
+
+<img width="1284" height="2289" alt="qrcode_1767584668806" src="https://github.com/user-attachments/assets/113ccf60-044a-47f3-ac8f-432ae05f89ee" />
