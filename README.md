@@ -80,3 +80,10 @@ pip install holidays APScheduler
 1. 每日生成消耗 LLM Token，参考天数和对话数越多消耗越大
 2. 需安装 `holidays` 库才能识别中国节日
 3. 重写日程会覆盖当日已有数据
+
+
+
+本插件开发QQ群：215532038
+
+<img width="1284" height="2289" alt="qrcode_1767584668806" src="https://github.com/user-attachments/assets/113ccf60-044a-47f3-ac8f-432ae05f89ee" />
+
