@@ -44,6 +44,7 @@ class ScheduleData:
     """单日数据（date 只作为内部 key，不对外暴露格式责任）"""
 
     date: str  # yyyy-mm-dd
+    outfit_style: str = ""
     outfit: str = ""
     schedule: str = ""
     status: ScheduleStatus = "ok"
@@ -53,6 +54,7 @@ class ScheduleData:
         """允许未来字段扩展"""
         return cls(
             date=data["date"],
+            outfit_style=data.get("outfit_style", ""),
             outfit=data.get("outfit", ""),
             schedule=data.get("schedule", ""),
             status=data.get("status", "ok"),

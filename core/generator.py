@@ -11,6 +11,10 @@ from astrbot.core.star.context import Context
 
 from .data import ScheduleData, ScheduleDataManager
 
+_STYLE_PREFIX_RE = re.compile(
+    r"^\s*(?:【?风格】?|\[?风格\]?)\s*[:：]\s*(?P<style>.+?)(?:\n|$)"
+)
+
 
 @dataclass(slots=True)
 class ScheduleContext:
@@ -27,6 +31,8 @@ class ScheduleContext:
 
 
 class SchedulerGenerator:
+    _STYLE_ENFORCE_RETRIES = 2
+
     def __init__(
         self,
         context: Context,
@@ -55,8 +61,23 @@ class SchedulerGenerator:
             logger.info(f"正在生成 {date_str} 的日程...")
             ctx = await self._collect_context(date, umo)
             prompt = self._build_prompt(ctx, extra)
-            content = await self._call_llm(prompt)
-            data = self._parse_result(content, date_str)
+            sid_base = f"life_scheduler_gen_{date_str}"
+            content = await self._call_llm(prompt, sid=f"{sid_base}_0")
+
+            payload = self._extract_json_obj(content)
+            ok, reason = self._validate_payload(payload, ctx)
+            for attempt in range(1, self._STYLE_ENFORCE_RETRIES + 1):
+                if ok:
+                    break
+                repair_prompt = self._build_style_repair_prompt(ctx, content, reason)
+                content = await self._call_llm(repair_prompt, sid=f"{sid_base}_{attempt}")
+                payload = self._extract_json_obj(content)
+                ok, reason = self._validate_payload(payload, ctx)
+
+            if not ok or not payload:
+                raise ValueError(f"模型未遵循穿搭风格约束：{reason}")
+
+            data = self._to_schedule_data(payload, date_str, ctx)
             self.data_mgr.set(data)
             logger.info(
                 f"日程生成成功: {json.dumps(asdict(data), ensure_ascii=False, indent=2)}"
@@ -85,7 +106,7 @@ class SchedulerGenerator:
             persona_desc=await self._get_persona(),
             history_schedules=self._get_history(data),
             recent_chats=await self._get_recent_chats(umo),
-            **self._pick_diversity(),
+            **self._pick_diversity(data.date()),
         )
 
     def _weekday(self, data):
@@ -106,14 +127,47 @@ class SchedulerGenerator:
             return ""
         return ""
 
-    def _pick_diversity(self) -> dict:
+    def _pick_diversity(self, today: datetime.date) -> dict:
         pool = self.config["pool"]
         return {
             "daily_theme": random.choice(pool["daily_themes"]),
             "mood_color": random.choice(pool["mood_colors"]),
-            "outfit_style": random.choice(pool["outfit_styles"]),
+            "outfit_style": self._pick_outfit_style(pool["outfit_styles"], today),
             "schedule_type": random.choice(pool["schedule_types"]),
         }
+
+    def _pick_outfit_style(self, styles: list[str], today: datetime.date) -> str:
+        styles = list(styles or [])
+        if not styles:
+            return ""
+
+        lookback_days = int(self.config.get("reference_history_days", 0) or 0)
+        if lookback_days <= 0 or len(styles) <= 1:
+            return random.choice(styles)
+
+        used: set[str] = set()
+        for i in range(1, lookback_days + 1):
+            date = today - datetime.timedelta(days=i)
+            data = self.data_mgr.get(date)
+            if not data or data.status != "ok":
+                continue
+
+            style = (getattr(data, "outfit_style", "") or "").strip()
+            if not style:
+                style = self._extract_style_from_outfit(data.outfit)
+            if style:
+                used.add(style)
+
+        candidates = [s for s in styles if s not in used]
+        return random.choice(candidates or styles)
+
+    def _extract_style_from_outfit(self, outfit: str) -> str:
+        if not outfit:
+            return ""
+        m = _STYLE_PREFIX_RE.match(outfit.strip())
+        if not m:
+            return ""
+        return (m.group("style") or "").strip()
 
     def _get_history(self, today: datetime.date) -> str:
         items: list[str] = []
@@ -130,10 +184,12 @@ class SchedulerGenerator:
 
             outfit = data.outfit[:40]
             schedule = data.schedule[:60]
+            style = (getattr(data, "outfit_style", "") or "").strip() or self._extract_style_from_outfit(data.outfit)
 
-            items.append(
-                f"[{date.strftime('%Y-%m-%d')}] 穿搭：{outfit} 日程：{schedule}"
-            )
+            if style:
+                items.append(f"[{date.strftime('%Y-%m-%d')}] 风格：{style} 穿搭：{outfit} 日程：{schedule}")
+            else:
+                items.append(f"[{date.strftime('%Y-%m-%d')}] 穿搭：{outfit} 日程：{schedule}")
 
         return "\n".join(items) if items else "（无历史记录）"
 
@@ -195,19 +251,27 @@ class SchedulerGenerator:
         for k in missing:
             ctx_dict[k] = ""
         prompt = self.config["prompt_template"].format(**ctx_dict)
-        
+
+        if ctx.outfit_style:
+            prompt += (
+                "\n\n## ✅ 强制约束（必须严格遵循）\n"
+                f"- 你必须严格遵循穿搭风格：【{ctx.outfit_style}】（不得替换/混用其他风格）。\n"
+                "- 你必须只输出 JSON 对象本体（不要 Markdown/代码块/解释）。\n"
+                f"- JSON 必须包含字段 \"outfit_style\"，且其值必须严格等于 \"{ctx.outfit_style}\"。\n"
+                f"- 字段 \"outfit\" 的第一行必须以 \"风格：{ctx.outfit_style}\" 开头。\n"
+            )
+
         # 如果有用户补充要求，追加到 prompt 末尾
         if extra:
             prompt += f"\n\n【用户补充要求】\n请在生成日程时特别注意以下要求：{extra}"
-        
+
         return prompt
 
-    async def _call_llm(self, prompt: str) -> str:
+    async def _call_llm(self, prompt: str, *, sid: str = "life_scheduler_gen") -> str:
         provider = self.context.get_using_provider()
         if not provider:
             raise RuntimeError("No provider")
 
-        sid = "life_scheduler_gen"
         try:
             resp = await provider.text_chat(prompt, session_id=sid)
             return resp.completion_text
@@ -223,7 +287,7 @@ class SchedulerGenerator:
             pass
 
     # ---------- parse ----------
-    def _parse_result(self, text: str, date_str: str) -> ScheduleData:
+    def _extract_json_obj(self, text: str) -> dict | None:
         text = text.strip()
         text = re.sub(r"^```json\s*", "", text, flags=re.MULTILINE)
         text = re.sub(r"^```\s*", "", text, flags=re.MULTILINE)
@@ -231,7 +295,7 @@ class SchedulerGenerator:
 
         start = text.find("{")
         if start == -1:
-            return ScheduleData(date=date_str, outfit="日常休闲装", schedule="无")
+            return None
 
         brace = 0
         in_string = False
@@ -256,16 +320,59 @@ class SchedulerGenerator:
                         json_str = text[start : i + 1]
                         try:
                             data = json.loads(json_str)
-                            return ScheduleData(
-                                date=date_str,
-                                outfit=data.get("outfit", "日常休闲装"),
-                                schedule=data.get("schedule", "无"),
-                            )
+                            return data if isinstance(data, dict) else None
                         except Exception:
-                            break
+                            return None
 
+        return None
+
+    def _validate_payload(self, payload: dict | None, ctx: ScheduleContext) -> tuple[bool, str]:
+        if not payload:
+            return False, "未能解析出 JSON 对象"
+
+        outfit = str(payload.get("outfit", "")).strip()
+        schedule = str(payload.get("schedule", "")).strip()
+        if not outfit:
+            return False, "outfit 不能为空"
+        if not schedule:
+            return False, "schedule 不能为空"
+
+        required = (ctx.outfit_style or "").strip()
+        if not required:
+            return True, ""
+
+        model_style = str(payload.get("outfit_style", "")).strip()
+        if model_style != required:
+            return False, f"outfit_style 必须严格等于 \"{required}\""
+
+        if not re.match(
+            rf"^\s*(?:风格|【风格】|\[风格\])\s*[:：]\s*{re.escape(required)}(?:\s|$)",
+            outfit,
+        ):
+            return False, f"outfit 第一行必须以 \"风格：{required}\" 开头"
+
+        return True, ""
+
+    def _build_style_repair_prompt(self, ctx: ScheduleContext, bad_text: str, reason: str) -> str:
+        required = (ctx.outfit_style or "").strip()
+        return (
+            "你之前的输出未通过校验，需要按要求重写。\n"
+            f"校验原因：{reason}\n"
+            f"必须使用穿搭风格：{required}\n\n"
+            "请只输出 JSON 对象本体，不要 Markdown，不要解释。\n"
+            "输出 JSON 必须包含字段：outfit_style、outfit、schedule。\n"
+            f"其中 outfit_style 必须严格等于 \"{required}\"；outfit 第一行必须以 \"风格：{required}\" 开头。\n\n"
+            "你之前的输出（供参考，可能不合规）：\n"
+            f"{bad_text}\n"
+        )
+
+    def _to_schedule_data(self, payload: dict, date_str: str, ctx: ScheduleContext) -> ScheduleData:
+        outfit = str(payload.get("outfit", "")).strip() or "日常休闲装"
+        schedule = str(payload.get("schedule", "")).strip() or "无"
+        outfit_style = str(payload.get("outfit_style", "")).strip() or (ctx.outfit_style or "")
         return ScheduleData(
             date=date_str,
-            outfit="日常休闲装",
-            schedule=text,
+            outfit_style=outfit_style,
+            outfit=outfit,
+            schedule=schedule,
         )
