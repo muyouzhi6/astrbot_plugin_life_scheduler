@@ -32,6 +32,7 @@ class ScheduleContext:
 
 class SchedulerGenerator:
     _STYLE_ENFORCE_RETRIES = 2
+    _EMPTY_COMPLETION_RETRIES = 1
 
     def __init__(
         self,
@@ -273,10 +274,28 @@ class SchedulerGenerator:
             raise RuntimeError("No provider")
 
         try:
-            resp = await provider.text_chat(prompt, session_id=sid)
-            return resp.completion_text
+            for attempt in range(self._EMPTY_COMPLETION_RETRIES + 1):
+                resp = await provider.text_chat(prompt, session_id=sid)
+                text = self._extract_completion_text(resp)
+                if text:
+                    return text
+                if attempt < self._EMPTY_COMPLETION_RETRIES:
+                    logger.warning("LLM completion 为空，准备重试一次")
+            raise RuntimeError("API返回的completion为空")
         finally:
             await self._cleanup_session(sid)
+
+    @staticmethod
+    def _extract_completion_text(resp: object) -> str:
+        if resp is None:
+            return ""
+        for key in ("completion_text", "completion", "text", "content"):
+            value = getattr(resp, key, None)
+            if isinstance(value, str):
+                text = value.strip()
+                if text:
+                    return text
+        return ""
 
     async def _cleanup_session(self, sid: str):
         try:
