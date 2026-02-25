@@ -269,7 +269,11 @@ class SchedulerGenerator:
         return prompt
 
     async def _call_llm(self, prompt: str, *, sid: str = "life_scheduler_gen") -> str:
-        provider = self.context.get_using_provider()
+        provider_id = self.config.get("llm_provider")
+        provider = (
+            self.context.get_provider_by_id(provider_id) if provider_id else None
+        ) or self.context.get_using_provider()
+
         if not provider:
             raise RuntimeError("No provider")
 

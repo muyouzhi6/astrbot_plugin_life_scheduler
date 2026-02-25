@@ -26,6 +26,13 @@
     },
     "default": 10
   },
+  "llm_provider": {
+    "description": "指定生成日程的 LLM 供应商",
+    "hint": "留空则使用当前正在使用的 LLM 供应商。",
+    "type": "string",
+    "_special": "select_provider",
+    "default": ""
+  },
   "pool": {
     "description": "创意池",
     "hint": "每次生成日程时，各个池会随机选择一个来并入日程生成提示词",
