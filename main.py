@@ -36,6 +36,35 @@ class LifeSchedulerPlugin(Star):
         """插件卸载时清理"""
         self.scheduler.stop()
 
+    async def get_life_context(self) -> dict:
+        """
+        获取生活上下文数据（供 DailySharing 插件调用）
+        返回格式符合 DailySharing 的 _parse_life_data 方法要求
+        """
+        today = datetime.datetime.now()
+        data = self.data_mgr.get(today)
+        
+        if not data:
+            # 尝试生成
+            try:
+                # 注意：这里传入 None 作为 umo，让 generator 使用默认行为
+                data = await self.generator.generate_schedule(today, None)
+            except RuntimeError:
+                return {}
+        
+        if not data or data.status == "failed":
+            return {}
+        
+        # 构建返回格式（与 DailySharing 的 _parse_life_data 兼容）
+        return {
+            "outfit": data.outfit,
+            "schedule": data.schedule,
+            "meta": {
+                "style": data.outfit_style,
+            },
+            "timeline": [],  # 如果有 timeline 数据可以在这里添加
+        }
+
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
         """System Prompt 注入"""
