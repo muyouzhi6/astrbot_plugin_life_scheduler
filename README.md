@@ -7,6 +7,7 @@
 - **日程生成**: 结合日期、节日、历史日程和近期对话，生成拟人化日程
 - **穿搭推荐**: 根据创意池随机选取风格，生成每日穿搭描述
 - **System Prompt 注入**: 自动将当日状态注入 LLM 上下文，Bot 会"记得"自己今天穿了什么、在做什么
+- **当前状态提取**: 对含时间点的日程自动提取当前或最近活动，减少对话中说出与日程冲突的状态
 - **懒加载**: 未到生成时间时，首次对话自动触发生成
 - **补充要求**: 重写日程时可附加自定义要求，让生成更符合预期
 
@@ -70,10 +71,21 @@ pip install holidays APScheduler
 ```xml
 <character_state>
 时间: 下午
+当前状态: 14:00 在咖啡厅看书...
 穿着: 白色针织衫搭配米色阔腿裤...
-日程: 上午整理房间，下午去咖啡厅看书...
+今日日程: 上午整理房间，下午去咖啡厅看书...
 </character_state>
 ```
+
+## 外部插件调用
+
+插件提供 `get_life_context()` 公共方法，供生图、每日分享等外部插件读取当前全局日程：
+
+```python
+life_data = await life_scheduler_plugin.get_life_context()
+```
+
+返回数据包含 `outfit`、`schedule`、`meta.style` 和 `timeline`。本插件当前保持全局日程语义，不按人格或会话隔离。
 
 ## 注意事项
 
@@ -86,4 +98,3 @@ pip install holidays APScheduler
 本插件开发QQ群：215532038
 
 <img width="1284" height="2289" alt="qrcode_1767584668806" src="https://github.com/user-attachments/assets/113ccf60-044a-47f3-ac8f-432ae05f89ee" />
-

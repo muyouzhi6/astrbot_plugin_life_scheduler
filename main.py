@@ -10,7 +10,7 @@ from astrbot.core.star.star_tools import StarTools
 from .core.data import ScheduleDataManager
 from .core.generator import SchedulerGenerator
 from .core.schedule import LifeScheduler
-from .core.utils import resolve_business_now, time_desc
+from .core.utils import build_character_state_injection, resolve_business_now
 
 
 class LifeSchedulerPlugin(Star):
@@ -67,7 +67,8 @@ class LifeSchedulerPlugin(Star):
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
         """System Prompt 注入"""
-        today = resolve_business_now(self.config.get("schedule_time"))
+        business_now = resolve_business_now(self.config.get("schedule_time"))
+        today = business_now
         umo = event.unified_msg_origin
         data = self.data_mgr.get(today)
         if not data:
@@ -78,15 +79,13 @@ class LifeSchedulerPlugin(Star):
         if data.status == "failed":
             return
 
-        inject_text = f"""
-<character_state>
-时间: {time_desc()}
-穿着: {data.outfit}
-日程: {data.schedule}
-</character_state>
-[上述状态仅供需要时参考，无需主动提及]"""
+        inject_text = build_character_state_injection(
+            data.outfit,
+            data.schedule,
+            business_now=business_now,
+        )
 
-        req.system_prompt += inject_text
+        req.system_prompt = (req.system_prompt or "") + inject_text
         logger.debug(f"[LLM] 添加的内在状态注入：{inject_text}")
 
     @filter.command("查看日程", alias={"life show"})

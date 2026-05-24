@@ -48,7 +48,10 @@ class SchedulerGenerator:
         self._generating = False
 
     async def generate_schedule(
-        self, date: datetime.datetime | None = None, umo: str | None = None, extra: str | None = None
+        self,
+        date: datetime.datetime | None = None,
+        umo: str | None = None,
+        extra: str | None = None,
     ) -> ScheduleData:
         async with self._gen_lock:
             if self._generating:
@@ -61,24 +64,43 @@ class SchedulerGenerator:
         try:
             logger.info(f"正在生成 {date_str} 的日程...")
             ctx = await self._collect_context(date, umo)
-            prompt = self._build_prompt(ctx, extra)
+            manual_extra = self._normalize_extra(extra)
+            prompt = self._build_prompt(ctx, manual_extra)
             sid_base = f"life_scheduler_gen_{date_str}"
             content = await self._call_llm(prompt, sid=f"{sid_base}_0")
 
             payload = self._extract_json_obj(content)
-            ok, reason = self._validate_payload(payload, ctx)
+            enforce_style = not manual_extra
+            ok, reason = self._validate_payload(
+                payload,
+                ctx,
+                enforce_style=enforce_style,
+                manual_extra=manual_extra,
+            )
             for attempt in range(1, self._STYLE_ENFORCE_RETRIES + 1):
                 if ok:
                     break
-                repair_prompt = self._build_style_repair_prompt(ctx, content, reason)
+                if manual_extra:
+                    repair_prompt = self._build_manual_repair_prompt(
+                        ctx, content, reason, manual_extra
+                    )
+                else:
+                    repair_prompt = self._build_style_repair_prompt(ctx, content, reason)
                 content = await self._call_llm(repair_prompt, sid=f"{sid_base}_{attempt}")
                 payload = self._extract_json_obj(content)
-                ok, reason = self._validate_payload(payload, ctx)
+                ok, reason = self._validate_payload(
+                    payload,
+                    ctx,
+                    enforce_style=enforce_style,
+                    manual_extra=manual_extra,
+                )
 
             if not ok or not payload:
-                raise ValueError(f"模型未遵循穿搭风格约束：{reason}")
+                raise ValueError(f"模型未遵循生成约束：{reason}")
 
-            data = self._to_schedule_data(payload, date_str, ctx)
+            data = self._to_schedule_data(
+                payload, date_str, ctx, manual_extra=manual_extra
+            )
             self.data_mgr.set(data)
             logger.info(
                 f"日程生成成功: {json.dumps(asdict(data), ensure_ascii=False, indent=2)}"
@@ -239,8 +261,118 @@ class SchedulerGenerator:
             return "你是一个热爱生活、情感细腻的AI伙伴。"
 
     # ---------- llm ----------
+    @staticmethod
+    def _normalize_extra(extra: str | None) -> str:
+        return str(extra or "").strip()
+
+    @staticmethod
+    def _normalize_requirement_text(text: str) -> str:
+        return re.sub(r"[\s\"'“”‘’`，,。.!！?？:：;；、（）()\[\]【】<>《》]", "", text)
+
+    _NEGATIVE_MARKER_RE = re.compile(r"不要再|不要|不能|不许|不想|不用|不需要|别再|别|避免|禁止|拒绝")
+    _OUTFIT_TERM_RE = re.compile(
+        r"吊带裙|吊带衫|连衣裙|半身裙|牛仔裤|黑丝|白丝|丝袜|吊带|短裙|长裙|裙|裤|袜|鞋|靴|衣|衫|外套|内衣|内裤|帽|包|耳钉|项链|手链|口红|妆|黑色|白色|红色|粉色|蓝色|绿色|黄色|紫色|灰色|米色|棕色|金色|银色|风格|穿搭"
+    )
+    _SCHEDULE_TERM_RE = re.compile(
+        r"下午茶|咖啡店|奶茶店|电影院|吃饭|睡觉|看书|出门|上班|上课|约会|咖啡|奶茶|电影|逛街|散步|阅读|学习|工作|健身|运动|睡|洗澡|拍照|做饭|烘焙|画画|游戏|瑜伽|公园|学校|公司|商场|餐厅|居酒屋|便利店|吃|喝"
+    )
+    _NEGATED_TERM_PREFIX_RE = re.compile(
+        r"(?:不要再|不用再|不需要再|不想再|不能再|不许再|别再)$|"
+        r"不(?:再|要|想|用|需要|许|去|穿|戴|安排|进行|做)?$|"
+        r"别(?:再|去|穿|戴|安排|进行|做)?$|"
+        r"避免$|禁止$|拒绝$|无$|没有$"
+    )
+
+    @classmethod
+    def _strip_manual_term(cls, text: str) -> str:
+        item = cls._normalize_requirement_text(text)
+        item = cls._NEGATIVE_MARKER_RE.sub("", item)
+        item = re.sub(
+            r"^(?:今天|今日|今儿|这次|请|麻烦|帮我|给我|让她|要|想|希望|必须|一定要|特别|注意|日程|安排|一个|一场|一份|一下|穿搭|穿着|穿|戴|换上|搭配|去|到|在|做|进行|来|搞)+",
+            "",
+            item,
+        )
+        item = re.sub(r"(?:一点|一些|一下|日程|安排)$", "", item)
+        return item
+
+    @classmethod
+    def _append_requirement(
+        cls, requirements: dict[str, list[str]], bucket: str, item: str
+    ) -> None:
+        if len(item) >= 2 and item not in requirements[bucket]:
+            requirements[bucket].append(item)
+
+    @classmethod
+    def _extract_known_terms(cls, item: str, term_re: re.Pattern) -> list[str]:
+        terms: list[str] = []
+        for match in term_re.finditer(item):
+            term = match.group(0)
+            if term not in terms:
+                terms.append(term)
+        return terms
+
+    @classmethod
+    def _append_forbidden_requirement(
+        cls, requirements: dict[str, list[str]], item: str
+    ) -> None:
+        terms = cls._extract_known_terms(item, cls._OUTFIT_TERM_RE)
+        for term in cls._extract_known_terms(item, cls._SCHEDULE_TERM_RE):
+            if term not in terms:
+                terms.append(term)
+        if terms:
+            for term in terms:
+                cls._append_requirement(requirements, "forbidden", term)
+            return
+        cls._append_requirement(requirements, "forbidden", item)
+
+    @classmethod
+    def _append_positive_requirement(
+        cls, requirements: dict[str, list[str]], item: str
+    ) -> None:
+        outfit_terms = cls._extract_known_terms(item, cls._OUTFIT_TERM_RE)
+        schedule_terms = cls._extract_known_terms(item, cls._SCHEDULE_TERM_RE)
+
+        for term in outfit_terms:
+            cls._append_requirement(requirements, "required_outfit", term)
+        for term in schedule_terms:
+            cls._append_requirement(requirements, "required_schedule", term)
+
+        if not outfit_terms and not schedule_terms:
+            cls._append_requirement(requirements, "required_any", item)
+
+    @classmethod
+    def _extract_manual_requirements(cls, extra: str) -> dict[str, list[str]]:
+        requirements = {
+            "required_outfit": [],
+            "required_schedule": [],
+            "required_any": [],
+            "forbidden": [],
+        }
+        segments = re.split(r"[，,。.!！?？:：;；、\n]", extra)
+        for segment in segments:
+            if not segment:
+                continue
+            is_negative = bool(cls._NEGATIVE_MARKER_RE.search(segment))
+            parts = re.split(r"和|与|以及|并且|然后|再", segment)
+            for part in parts:
+                item = cls._strip_manual_term(part)
+                if len(item) < 2:
+                    continue
+                if is_negative:
+                    cls._append_forbidden_requirement(requirements, item)
+                else:
+                    cls._append_positive_requirement(requirements, item)
+        for key, value in requirements.items():
+            requirements[key] = value[:8]
+        return requirements
+
     def _build_prompt(self, ctx: ScheduleContext, extra: str | None = None) -> str:
+        extra = self._normalize_extra(extra)
         ctx_dict = asdict(ctx)  # 实际有的字段
+        if extra:
+            ctx_dict["outfit_style"] = "用户指定"
+            ctx_dict["schedule_type"] = "用户指定"
+
         tmpl_vars = set(re.findall(r"\{(\w+)\}", self.config["prompt_template"]))
         missing = tmpl_vars - ctx_dict.keys()
         if missing:
@@ -253,7 +385,18 @@ class SchedulerGenerator:
             ctx_dict[k] = ""
         prompt = self.config["prompt_template"].format(**ctx_dict)
 
-        if ctx.outfit_style:
+        if extra:
+            prompt += (
+                "\n\n## ✅ 用户补充强制约束（最高优先级，必须严格遵循）\n"
+                f"- 用户补充要求：{extra}\n"
+                "- 用户补充要求优先级高于今日主题、心情色彩、穿搭风格、日程类型和历史日程参考。\n"
+                "- 如果用户补充要求与上文随机创意池或模板中的穿搭风格冲突，必须以用户补充要求为准。\n"
+                "- 不得忽略、替换、弱化或用随机创意池覆盖用户补充要求中的具体衣物、场景和活动。\n"
+                "- 你必须只输出 JSON 对象本体（不要 Markdown/代码块/解释）。\n"
+                '- JSON 必须包含字段 "outfit_style"、"outfit"、"schedule"。\n'
+                '- 当用户指定了具体穿搭时，"outfit" 必须直接包含这些具体穿搭元素。\n'
+            )
+        elif ctx.outfit_style:
             prompt += (
                 "\n\n## ✅ 强制约束（必须严格遵循）\n"
                 f"- 你必须严格遵循穿搭风格：【{ctx.outfit_style}】（不得替换/混用其他风格）。\n"
@@ -261,10 +404,6 @@ class SchedulerGenerator:
                 f"- JSON 必须包含字段 \"outfit_style\"，且其值必须严格等于 \"{ctx.outfit_style}\"。\n"
                 f"- 字段 \"outfit\" 的第一行必须以 \"风格：{ctx.outfit_style}\" 开头。\n"
             )
-
-        # 如果有用户补充要求，追加到 prompt 末尾
-        if extra:
-            prompt += f"\n\n【用户补充要求】\n请在生成日程时特别注意以下要求：{extra}"
 
         return prompt
 
@@ -349,7 +488,14 @@ class SchedulerGenerator:
 
         return None
 
-    def _validate_payload(self, payload: dict | None, ctx: ScheduleContext) -> tuple[bool, str]:
+    def _validate_payload(
+        self,
+        payload: dict | None,
+        ctx: ScheduleContext,
+        *,
+        enforce_style: bool = True,
+        manual_extra: str = "",
+    ) -> tuple[bool, str]:
         if not payload:
             return False, "未能解析出 JSON 对象"
 
@@ -360,7 +506,13 @@ class SchedulerGenerator:
         if not schedule:
             return False, "schedule 不能为空"
 
+        requirement_errors = self._manual_requirement_errors(payload, manual_extra)
+        if requirement_errors:
+            return False, "用户补充要求未满足：" + "；".join(requirement_errors)
+
         required = (ctx.outfit_style or "").strip()
+        if not enforce_style:
+            return True, ""
         if not required:
             return True, ""
 
@@ -376,6 +528,57 @@ class SchedulerGenerator:
 
         return True, ""
 
+    def _manual_requirement_errors(self, payload: dict, manual_extra: str) -> list[str]:
+        manual_extra = self._normalize_extra(manual_extra)
+        if not manual_extra:
+            return []
+
+        requirements = self._extract_manual_requirements(manual_extra)
+        if not any(requirements.values()):
+            return []
+
+        outfit = self._normalize_requirement_text(str(payload.get("outfit", "")))
+        schedule = self._normalize_requirement_text(str(payload.get("schedule", "")))
+        any_text = f"{outfit}{schedule}"
+        errors: list[str] = []
+
+        missing_outfit = [
+            term for term in requirements["required_outfit"] if term not in outfit
+        ]
+        if missing_outfit:
+            errors.append("穿搭缺少 " + ", ".join(missing_outfit))
+
+        missing_schedule = [
+            term for term in requirements["required_schedule"] if term not in schedule
+        ]
+        if missing_schedule:
+            errors.append("日程缺少 " + ", ".join(missing_schedule))
+
+        missing_any = [term for term in requirements["required_any"] if term not in any_text]
+        if missing_any:
+            errors.append("内容缺少 " + ", ".join(missing_any))
+
+        forbidden_hits = [
+            term
+            for term in requirements["forbidden"]
+            if self._has_unnegated_term(any_text, term)
+        ]
+        if forbidden_hits:
+            errors.append("出现了用户要求避免的内容 " + ", ".join(forbidden_hits))
+
+        return errors
+
+    @classmethod
+    def _has_unnegated_term(cls, text: str, term: str) -> bool:
+        if term not in text:
+            return False
+        for match in re.finditer(re.escape(term), text):
+            prefix = text[max(0, match.start() - 6) : match.start()]
+            if cls._NEGATED_TERM_PREFIX_RE.search(prefix):
+                continue
+            return True
+        return False
+
     def _build_style_repair_prompt(self, ctx: ScheduleContext, bad_text: str, reason: str) -> str:
         required = (ctx.outfit_style or "").strip()
         return (
@@ -389,10 +592,39 @@ class SchedulerGenerator:
             f"{bad_text}\n"
         )
 
-    def _to_schedule_data(self, payload: dict, date_str: str, ctx: ScheduleContext) -> ScheduleData:
+    def _build_manual_repair_prompt(
+        self, ctx: ScheduleContext, bad_text: str, reason: str, extra: str
+    ) -> str:
+        return (
+            "你之前的输出未通过校验，需要按用户补充要求重写。\n"
+            f"校验原因：{reason}\n"
+            f"日期：{ctx.date_str} {ctx.weekday} {ctx.holiday}\n"
+            f"用户补充要求（最高优先级）：{extra}\n\n"
+            "必须遵循：\n"
+            "- 用户补充要求高于随机创意池、穿搭风格、日程类型和历史日程。\n"
+            "- 不得忽略、替换或弱化用户指定的具体穿搭、场景和活动。\n"
+            "- 请只输出 JSON 对象本体，不要 Markdown，不要解释。\n"
+            '- 输出 JSON 必须包含字段：outfit_style、outfit、schedule。\n\n'
+            "你之前的输出（供参考，可能不合规）：\n"
+            f"{bad_text}\n"
+        )
+
+    def _to_schedule_data(
+        self,
+        payload: dict,
+        date_str: str,
+        ctx: ScheduleContext,
+        *,
+        manual_extra: str = "",
+    ) -> ScheduleData:
         outfit = str(payload.get("outfit", "")).strip() or "日常休闲装"
         schedule = str(payload.get("schedule", "")).strip() or "无"
-        outfit_style = str(payload.get("outfit_style", "")).strip() or (ctx.outfit_style or "")
+        if manual_extra:
+            outfit_style = "用户指定"
+        else:
+            outfit_style = str(payload.get("outfit_style", "")).strip() or (
+                ctx.outfit_style or ""
+            )
         return ScheduleData(
             date=date_str,
             outfit_style=outfit_style,
