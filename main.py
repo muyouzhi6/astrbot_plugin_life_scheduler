@@ -69,11 +69,10 @@ class LifeSchedulerPlugin(Star):
         """查看今日的穿搭和日程安排"""
         business_now = resolve_business_now(self.config.get("schedule_time"))
         today = business_now
-        umo = event.unified_msg_origin
         data = self.data_mgr.get(today)
         if not data:
             try:
-                data = await self.generator.generate_schedule(today, umo)
+                data = await self.generator.generate_schedule(today, None)
             except RuntimeError:
                 return
         if data.status == "failed":
