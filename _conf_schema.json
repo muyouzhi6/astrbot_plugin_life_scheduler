@@ -26,6 +26,12 @@
     },
     "default": 10
   },
+  "default_reference_umo": {
+    "description": "默认参考会话来源",
+    "hint": "留空则不使用默认参考会话。配置后，会作为定时生成日程或未指定会话来源时的兜底参考会话。填写格式：<bot>:<GroupMessage|FriendMessage>:id，例如 bot:GroupMessage:123456789。",
+    "type": "string",
+    "default": ""
+  },
   "llm_provider": {
     "description": "指定生成日程的 LLM 供应商",
     "hint": "留空则使用当前正在使用的 LLM 供应商。",

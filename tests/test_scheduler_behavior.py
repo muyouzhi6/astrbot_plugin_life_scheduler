@@ -4,6 +4,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 class _Logger:
@@ -86,6 +87,7 @@ def _config():
     return {
         "reference_history_days": 3,
         "reference_recent_count": 0,
+        "default_reference_umo": "",
         "llm_provider": "",
         "pool": {
             "daily_themes": ["探索日"],
@@ -353,6 +355,63 @@ class SchedulerBehaviorTest(unittest.IsolatedAsyncioTestCase):
             select_current_activity(schedule, now=now, wrap_previous_day=False),
             "08:00 起床洗漱",
         )
+
+    async def test_collect_context_uses_default_reference_umo_when_event_missing(self):
+        generator, _ = self._generator()
+        generator.config["default_reference_umo"] = "default-umo"
+
+        seen = {}
+
+        async def fake_get_recent_chats(umo, count=None):
+            seen["umo"] = umo
+            return f"recent:{umo}"
+
+        generator._get_recent_chats = fake_get_recent_chats
+
+        ctx = await generator._collect_context(datetime.datetime(2026, 5, 24), None)
+
+        self.assertEqual(seen["umo"], "default-umo")
+        self.assertEqual(ctx.recent_chats, "recent:default-umo")
+
+    async def test_collect_context_logs_effective_umo(self):
+        generator, _ = self._generator()
+        generator.config["default_reference_umo"] = "default-umo"
+
+        async def fake_get_recent_chats(umo, count=None):
+            return f"recent:{umo}"
+
+        generator._get_recent_chats = fake_get_recent_chats
+
+        with patch("core.generator.logger.debug") as mock_debug:
+            await generator._collect_context(datetime.datetime(2026, 5, 24), None)
+
+        mock_debug.assert_any_call("[LLM] UMO 上下文注入：default-umo")
+
+    async def test_collect_context_prefers_explicit_umo_over_default_reference(self):
+        generator, _ = self._generator()
+        generator.config["default_reference_umo"] = "default-umo"
+
+        seen = {}
+
+        async def fake_get_recent_chats(umo, count=None):
+            seen["umo"] = umo
+            return f"recent:{umo}"
+
+        generator._get_recent_chats = fake_get_recent_chats
+
+        ctx = await generator._collect_context(
+            datetime.datetime(2026, 5, 24), "event-umo"
+        )
+
+        self.assertEqual(seen["umo"], "event-umo")
+        self.assertEqual(ctx.recent_chats, "recent:event-umo")
+
+    async def test_collect_context_keeps_empty_reference_behavior_when_not_configured(self):
+        generator, _ = self._generator()
+
+        ctx = await generator._collect_context(datetime.datetime(2026, 5, 24), None)
+
+        self.assertEqual(ctx.recent_chats, "无近期对话")
 
     def test_character_state_injection_includes_current_activity(self):
         schedule = (

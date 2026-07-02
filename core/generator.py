@@ -122,15 +122,25 @@ class SchedulerGenerator:
     async def _collect_context(
         self, data: datetime.datetime, umo: str | None
     ) -> ScheduleContext:
+        effective_umo = self._resolve_reference_umo(umo)
+        logger.debug(f"[LLM] UMO 上下文注入：{effective_umo or '未配置'}")
         return ScheduleContext(
             date_str=data.strftime("%Y年%m月%d日"),
             weekday=self._weekday(data),
             holiday=self._get_holiday_info(data.date()),
             persona_desc=await self._get_persona(),
             history_schedules=self._get_history(data),
-            recent_chats=await self._get_recent_chats(umo),
+            recent_chats=await self._get_recent_chats(effective_umo),
             **self._pick_diversity(data.date()),
         )
+
+    def _resolve_reference_umo(self, umo: str | None) -> str | None:
+        candidate = str(umo or "").strip()
+        if candidate:
+            return candidate
+
+        default_umo = str(self.config.get("default_reference_umo", "") or "").strip()
+        return default_umo or None
 
     def _weekday(self, data):
         return ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"][

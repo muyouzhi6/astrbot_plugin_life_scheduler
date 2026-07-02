@@ -26,7 +26,7 @@ pip install holidays APScheduler
 | `重写日程 <补充要求>` | 管理员 | 带补充要求重新生成，例如：`重写日程 今天穿黑色连衣裙，安排一个下午茶` |
 | `日程时间 <HH:MM>` | 管理员 | 设置每日自动生成时间 |
 
-别名：`life show`、`life renew`、`life time`
+别名：`life show`、`life renew`、`life time`、`life umo`
 
 ## 配置项
 
@@ -35,6 +35,7 @@ pip install holidays APScheduler
 | `schedule_time` | string | `07:00` | 每日自动生成日程的时间 |
 | `reference_history_days` | int | `3` | 生成时参考的历史日程天数 (1-7) |
 | `reference_recent_count` | int | `10` | 生成时参考的近期会话数量，0 表示不参考 |
+| `default_reference_umo` | string | `""` | 默认参考会话来源，用于定时生成日程或未指定会话来源时作为兜底参考 |
 | `pool` | object | - | 创意池，每次生成随机选取 |
 | `prompt_template` | text | - | LLM 生成日程的 Prompt 模板 |
 
