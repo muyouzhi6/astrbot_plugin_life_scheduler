@@ -3,6 +3,8 @@ import datetime
 import json
 import random
 import re
+from functools import lru_cache
+from pathlib import Path
 from dataclasses import asdict, dataclass
 
 from astrbot.api import logger
@@ -43,6 +45,7 @@ class SchedulerGenerator:
         self.context = context
         self.config = config
         self.data_mgr = data_mgr
+        self._ensure_prompt_template_default()
 
         self._gen_lock = asyncio.Lock()
         self._generating = False
@@ -383,7 +386,8 @@ class SchedulerGenerator:
             ctx_dict["outfit_style"] = "用户指定"
             ctx_dict["schedule_type"] = "用户指定"
 
-        tmpl_vars = set(re.findall(r"\{(\w+)\}", self.config["prompt_template"]))
+        template = self._get_prompt_template()
+        tmpl_vars = set(re.findall(r"\{(\w+)\}", template))
         missing = tmpl_vars - ctx_dict.keys()
         if missing:
             logger.warning(
@@ -393,7 +397,7 @@ class SchedulerGenerator:
         # 统一补空值，避免 KeyError
         for k in missing:
             ctx_dict[k] = ""
-        prompt = self.config["prompt_template"].format(**ctx_dict)
+        prompt = self._render_prompt_template(template, ctx_dict)
 
         if extra:
             prompt += (
@@ -416,6 +420,56 @@ class SchedulerGenerator:
             )
 
         return prompt
+
+    def _get_prompt_template(self) -> str:
+        template = str(self.config.get("prompt_template", "") or "").strip()
+        if template:
+            return template
+        return self._default_prompt_template()
+
+    def _ensure_prompt_template_default(self) -> None:
+        template = str(self.config.get("prompt_template", "") or "").strip()
+        if template:
+            return
+
+        default_template = self._default_prompt_template()
+        if not default_template:
+            return
+
+        self.config["prompt_template"] = default_template
+        save_config = getattr(self.config, "save_config", None)
+        if callable(save_config):
+            try:
+                save_config()
+            except Exception:
+                logger.warning("保存默认 prompt_template 失败，已在内存中回填默认值")
+
+    @classmethod
+    def _render_prompt_template(cls, template: str, values: dict[str, object]) -> str:
+        """只替换已知占位符，避免用户在 WebUI 中写坏花括号时直接抛异常。"""
+        placeholder = re.compile(r"\{(\w+)\}")
+        left_token = "\u0000LBRACE\u0000"
+        right_token = "\u0000RBRACE\u0000"
+
+        rendered = template.replace("{{", left_token).replace("}}", right_token)
+
+        def _replace(match: re.Match[str]) -> str:
+            key = match.group(1)
+            return str(values.get(key, ""))
+
+        rendered = placeholder.sub(_replace, rendered)
+        return rendered.replace(left_token, "{").replace(right_token, "}")
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _default_prompt_template() -> str:
+        schema_path = Path(__file__).resolve().parent.parent / "_conf_schema.json"
+        try:
+            data = json.loads(schema_path.read_text(encoding="utf-8"))
+            template = data.get("prompt_template", {}).get("default", "")
+            return str(template or "")
+        except Exception:
+            return ""
 
     async def _call_llm(self, prompt: str, *, sid: str = "life_scheduler_gen") -> str:
         provider_id = self.config.get("llm_provider")

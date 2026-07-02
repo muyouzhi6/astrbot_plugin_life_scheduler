@@ -83,6 +83,15 @@ class _Context:
         return self.provider
 
 
+class _ConfigDict(dict):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.saved = False
+
+    def save_config(self):
+        self.saved = True
+
+
 def _config():
     return {
         "reference_history_days": 3,
@@ -193,6 +202,43 @@ class SchedulerBehaviorTest(unittest.IsolatedAsyncioTestCase):
             manual_extra="穿黑丝和吊带裙",
         )
         self.assertEqual(data.outfit_style, "用户指定")
+
+    def test_prompt_rendering_survives_crlf_and_literal_json_braces(self):
+        generator, _ = self._generator()
+        generator.config["prompt_template"] = (
+            "# Role: Life Scheduler\r\n"
+            "## Output\r\n"
+            "{\r\n"
+            '  "outfit_style": "{outfit_style}",\r\n'
+            '  "outfit": "...",\r\n'
+            '  "schedule": "..."\r\n'
+            "}\r\n"
+            "## Recent Chats\r\n"
+            "{recent_chats}\r\n"
+        )
+
+        prompt = generator._build_prompt(_ctx())
+
+        self.assertIn('"outfit_style": "甜酷混搭风"', prompt)
+        self.assertIn("## Recent Chats", prompt)
+
+    def test_empty_prompt_template_falls_back_to_default(self):
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            data_mgr = ScheduleDataManager(Path(tmp.name) / "schedule_data.json")
+            config = _ConfigDict(_config())
+            config["prompt_template"] = ""
+            generator = SchedulerGenerator(_Context(_Provider([])), config, data_mgr)
+
+            self.assertTrue(config.saved)
+            self.assertIn("# Role: Life Scheduler", config["prompt_template"])
+            prompt = generator._build_prompt(_ctx())
+
+            self.assertIn("# Role: Life Scheduler", prompt)
+            self.assertIn("## Context", prompt)
+            self.assertIn("## Output Format", prompt)
+        finally:
+            tmp.cleanup()
 
     def test_manual_extra_supports_negative_constraints(self):
         generator, _ = self._generator()
