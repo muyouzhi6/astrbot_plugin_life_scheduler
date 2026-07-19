@@ -1,4 +1,5 @@
 import datetime
+import re
 import sys
 import tempfile
 import types
@@ -239,6 +240,41 @@ class SchedulerBehaviorTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("## Output Format", prompt)
         finally:
             tmp.cleanup()
+
+    def test_build_prompt_replaces_rN_with_random_integers(self):
+        generator, _ = self._generator()
+        generator.config["prompt_template"] = (
+            "r1={r1} r2={r2} r99={r99}\n"
+            "style={outfit_style}\n"
+        )
+        prompt = generator._build_prompt(_ctx())
+
+        m1 = re.search(r"r1=(\d+)", prompt)
+        self.assertIsNotNone(m1)
+        self.assertTrue(1 <= int(m1.group(1)) <= 100, f"r1={m1.group(1)}")
+
+        m2 = re.search(r"r2=(\d+)", prompt)
+        self.assertIsNotNone(m2)
+        self.assertTrue(1 <= int(m2.group(1)) <= 100, f"r2={m2.group(1)}")
+
+        m99 = re.search(r"r99=(\d+)", prompt)
+        self.assertIsNotNone(m99)
+        self.assertTrue(1 <= int(m99.group(1)) <= 100, f"r99={m99.group(1)}")
+
+        self.assertIn("甜酷混搭风", prompt)
+
+    def test_rN_placeholders_are_independent(self):
+        generator, _ = self._generator()
+        generator.config["prompt_template"] = "{r1}-{r2}\n"
+
+        seen_pairs = set()
+        for _ in range(10):
+            prompt = generator._build_prompt(_ctx()).strip()
+            pair = tuple(prompt.split("-", 1))
+            seen_pairs.add(pair)
+
+        self.assertGreaterEqual(len(seen_pairs), 2,
+                                "Expected r1/r2 to vary independently in 10 runs")
 
     def test_manual_extra_supports_negative_constraints(self):
         generator, _ = self._generator()
