@@ -4,6 +4,8 @@ import json
 import random
 import re
 from dataclasses import asdict, dataclass
+from functools import lru_cache
+from pathlib import Path
 
 from astrbot.api import logger
 from astrbot.core.config.astrbot_config import AstrBotConfig
@@ -47,6 +49,7 @@ class SchedulerGenerator:
         self.config = config
         self.data_mgr = data_mgr
         self.wardrobe_mgr = wardrobe_mgr
+        self._ensure_prompt_template_default()
 
         self._gen_lock = asyncio.Lock()
         self._generating = False
@@ -145,13 +148,15 @@ class SchedulerGenerator:
         umo: str | None,
         image_description: str = "",
     ) -> ScheduleContext:
+        effective_umo = self._resolve_reference_umo(umo)
+        logger.debug(f"[LLM] UMO 上下文注入：{effective_umo or '未配置'}")
         return ScheduleContext(
             date_str=data.strftime("%Y年%m月%d日"),
             weekday=self._weekday(data),
             holiday=self._get_holiday_info(data.date()),
             persona_desc=await self._get_persona(),
             history_schedules=self._get_history(data),
-            recent_chats=await self._get_recent_chats(umo),
+            recent_chats=await self._get_recent_chats(effective_umo),
             wardrobe=(
                 self.wardrobe_mgr.for_prompt()
                 if self.wardrobe_mgr is not None
@@ -160,6 +165,21 @@ class SchedulerGenerator:
             image_description=image_description,
             **self._pick_diversity(data.date()),
         )
+
+    def _resolve_reference_umo(self, umo: str | None) -> str | None:
+        """Resolve the current conversation or the configured fallback session.
+
+        Args:
+            umo: Session origin for the current event.
+
+        Returns:
+            The session origin used for recent-chat context, or None.
+        """
+        candidate = str(umo or "").strip()
+        if candidate:
+            return candidate
+        default_umo = str(self.config.get("default_reference_umo", "") or "").strip()
+        return default_umo or None
 
     def _weekday(self, data):
         return ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"][
@@ -411,7 +431,11 @@ class SchedulerGenerator:
             ctx_dict["outfit_style"] = "用户指定"
             ctx_dict["schedule_type"] = "用户指定"
 
-        tmpl_vars = set(re.findall(r"\{(\w+)\}", self.config["prompt_template"]))
+        template = self._get_prompt_template()
+        tmpl_vars = set(re.findall(r"\{(\w+)\}", template))
+        for var in tmpl_vars:
+            if re.match(r"^r\d+$", var):
+                ctx_dict[var] = str(random.randint(1, 100))
         missing = tmpl_vars - ctx_dict.keys()
         if missing:
             logger.warning(
@@ -421,7 +445,7 @@ class SchedulerGenerator:
         # 统一补空值，避免 KeyError
         for k in missing:
             ctx_dict[k] = ""
-        prompt = self.config["prompt_template"].format(**ctx_dict)
+        prompt = self._render_prompt_template(template, ctx_dict)
 
         if ctx.wardrobe:
             prompt += (
@@ -461,6 +485,52 @@ class SchedulerGenerator:
             )
 
         return prompt
+
+    def _get_prompt_template(self) -> str:
+        """Return the configured template, restoring the bundled default when empty."""
+        template = str(self.config.get("prompt_template", "") or "").strip()
+        return template or self._default_prompt_template()
+
+    def _ensure_prompt_template_default(self) -> None:
+        """Restore an empty prompt template in memory and persist it when supported."""
+        template = str(self.config.get("prompt_template", "") or "").strip()
+        if template:
+            return
+        default_template = self._default_prompt_template()
+        if not default_template:
+            return
+        self.config["prompt_template"] = default_template
+        save_config = getattr(self.config, "save_config", None)
+        if callable(save_config):
+            try:
+                save_config()
+            except Exception:
+                logger.warning("保存默认 prompt_template 失败，已在内存中回填默认值")
+
+    @classmethod
+    def _render_prompt_template(cls, template: str, values: dict[str, object]) -> str:
+        """Render known placeholders without treating literal JSON braces as fields."""
+        placeholder = re.compile(r"\{(\w+)\}")
+        left_token = "\u0000LBRACE\u0000"
+        right_token = "\u0000RBRACE\u0000"
+        rendered = template.replace("{{", left_token).replace("}}", right_token)
+
+        def replace(match: re.Match[str]) -> str:
+            return str(values.get(match.group(1), ""))
+
+        rendered = placeholder.sub(replace, rendered)
+        return rendered.replace(left_token, "{").replace(right_token, "}")
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _default_prompt_template() -> str:
+        """Load the bundled default Prompt template from the plugin schema."""
+        schema_path = Path(__file__).resolve().parent.parent / "_conf_schema.json"
+        try:
+            data = json.loads(schema_path.read_text(encoding="utf-8"))
+            return str(data.get("prompt_template", {}).get("default", "") or "")
+        except Exception:
+            return ""
 
     async def _call_llm(
         self,

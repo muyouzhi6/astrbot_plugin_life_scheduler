@@ -195,6 +195,19 @@ class SchedulerBehaviorTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(data.outfit_style, "用户指定")
 
+    def test_reference_session_and_random_prompt_placeholders_are_preserved(self):
+        generator, _ = self._generator()
+        generator.config["default_reference_umo"] = "bot:FriendMessage:42"
+        self.assertEqual(generator._resolve_reference_umo(None), "bot:FriendMessage:42")
+        self.assertEqual(
+            generator._resolve_reference_umo("bot:FriendMessage:99"),
+            "bot:FriendMessage:99",
+        )
+        generator.config["prompt_template"] = '值={r1}; JSON={{"outfit": "x"}}'
+        rendered = generator._build_prompt(_ctx())
+        self.assertRegex(rendered, r"值=\d{1,3}")
+        self.assertIn('{"outfit": "x"}', rendered)
+
     async def test_image_description_uses_image_provider_and_relaxes_random_style(self):
         generator, provider = self._generator(
             [

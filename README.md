@@ -32,8 +32,9 @@ pip install holidays APScheduler
 | `放进衣柜 <文字>` | 管理员 | 可附图片、引用图片或文字，整理后保存为衣柜方案 |
 | `查看衣柜` | 所有人 | 以 HTML 图片展示最近保存的穿搭方案及数字编号 |
 | `日程时间 <HH:MM>` | 管理员 | 设置每日自动生成时间 |
+| `参考会话 [set\|show\|clear]` | 管理员 | 设置、查看或清除定时生成日程时参考的默认会话 |
 
-别名：`life show`、`life renew`、`life time`
+别名：`life show`、`life renew`、`life time`、`life umo`
 
 ## 配置项
 
@@ -42,6 +43,7 @@ pip install holidays APScheduler
 | `schedule_time` | string | `07:00` | 每日自动生成日程的时间 |
 | `reference_history_days` | int | `3` | 生成时参考的历史日程天数 (1-7) |
 | `reference_recent_count` | int | `10` | 生成时参考的近期会话数量，0 表示不参考 |
+| `default_reference_umo` | string | `""` | 默认参考会话来源，用于定时生成日程或未指定会话来源时兜底参考 |
 | `llm_provider` | provider | 空 | 日程生成模型，留空跟随当前 provider |
 | `image_provider` | provider | 空 | 图片转写模型，留空跟随 `llm_provider`；建议选择支持视觉输入的 provider |
 | `pool` | object | - | 创意池，每次生成随机选取 |
@@ -72,6 +74,7 @@ pip install holidays APScheduler
 | `{schedule_type}` | 从创意池选取的日程类型 |
 | `{history_schedules}` | 历史日程记录 |
 | `{recent_chats}` | 近期对话记录 |
+| `{r1}`、`{r2}` … `{rN}` | 每次生成时独立随机的 1-100 整数 |
 
 ## 注入机制
 

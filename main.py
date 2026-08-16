@@ -41,6 +41,20 @@ class LifeSchedulerPlugin(Star):
         )
         self.scheduler.start()
 
+    def _save_config(self):
+        save_config = getattr(self.config, "save_config", None)
+        if callable(save_config):
+            save_config()
+
+    @staticmethod
+    def _format_reference_umo(umo: str, *, truncate: bool = True) -> str:
+        umo = str(umo or "").strip()
+        if not umo:
+            return "未配置"
+        if not truncate or len(umo) <= 20:
+            return umo
+        return f"{umo[:8]}...{umo[-4:]}（共{len(umo)}字符）"
+
     async def terminate(self):
         """插件卸载时清理"""
         self.scheduler.stop()
@@ -505,6 +519,40 @@ class LifeSchedulerPlugin(Star):
             logger.error("LLM schedule edit failed: %s", exc)
             return f"今日计划修改失败：{exc}"
         return f"今日计划已更新：\n穿搭：{data.outfit}\n日程：{data.schedule}"
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("参考会话", alias={"life umo"})
+    async def life_reference_umo(
+        self, event: AstrMessageEvent, param: GreedyStr = GreedyStr
+    ):
+        """参考会话 [set|show|clear]，设置默认参考会话来源。"""
+        action = str(param or "set").strip().lower()
+        if action in {"", "set"}:
+            umo = str(event.unified_msg_origin or "").strip()
+            if not umo:
+                yield event.plain_result("当前事件没有可保存的会话来源")
+                return
+            self.config["default_reference_umo"] = umo
+            self._save_config()
+            yield event.plain_result(
+                f"已保存默认参考会话：{self._format_reference_umo(umo)}"
+            )
+            return
+        if action == "show":
+            umo = str(self.config.get("default_reference_umo", "") or "").strip()
+            if umo:
+                yield event.plain_result(
+                    f"默认参考会话已配置：{self._format_reference_umo(umo, truncate=False)}"
+                )
+            else:
+                yield event.plain_result("默认参考会话未配置")
+            return
+        if action == "clear":
+            self.config["default_reference_umo"] = ""
+            self._save_config()
+            yield event.plain_result("已清除默认参考会话")
+            return
+        yield event.plain_result("用法：参考会话 [set|show|clear]")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("日程时间", alias={"life time"})
