@@ -424,11 +424,7 @@ class LifeSchedulerPlugin(Star):
         """
         if not event.is_admin():
             return "未执行：只有管理员可以修改衣柜。"
-        entry = self.wardrobe_mgr.find(query)
-        if entry is None:
-            query_match = re.fullmatch(r"(?:穿搭\s*)?(\d+)", str(query).strip())
-            if query_match:
-                entry = self.wardrobe_mgr.find_by_number(int(query_match.group(1)))
+        entry = self.wardrobe_mgr.find_for_user_query(query)
         if entry is None:
             return f"没有找到匹配的衣柜方案：{query}"
         self.wardrobe_mgr.remove(entry["id"])
@@ -449,11 +445,7 @@ class LifeSchedulerPlugin(Star):
         """
         if not event.is_admin():
             return "未执行：只有管理员可以修改衣柜。"
-        entry = self.wardrobe_mgr.find(query)
-        if entry is None:
-            query_match = re.fullmatch(r"(?:穿搭\s*)?(\d+)", str(query).strip())
-            if query_match:
-                entry = self.wardrobe_mgr.find_by_number(int(query_match.group(1)))
+        entry = self.wardrobe_mgr.find_for_user_query(query)
         if entry is None:
             return f"没有找到匹配的衣柜方案：{query}"
 

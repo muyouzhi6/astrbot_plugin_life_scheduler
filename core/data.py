@@ -1,5 +1,6 @@
 import datetime
 import json
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, Union
@@ -259,6 +260,29 @@ class WardrobeDataManager:
             ):
                 return dict(entry)
         return None
+
+    def find_for_user_query(
+        self, query: str, *, limit: int = 20
+    ) -> dict[str, str] | None:
+        """Resolve a user-facing wardrobe number or a stable query.
+
+        Args:
+            query: Display number such as ``穿搭2``/``2``, a stable entry ID,
+                or a description keyword.
+            limit: Number of recent entries exposed as display numbers.
+
+        Returns:
+            The matching wardrobe entry, or ``None`` when no entry matches.
+        """
+        query_text = str(query or "").strip()
+        query_match = re.fullmatch(r"(穿搭\s*)?(\d+)", query_text)
+        if query_match:
+            number = int(query_match.group(2))
+            if query_match.group(1) or number <= limit:
+                numbered = self.find_by_number(number, limit=limit)
+                if numbered is not None or query_match.group(1):
+                    return numbered
+        return self.find(query_text)
 
     def replace(
         self, entry_id: str, description: str, *, note: str = ""

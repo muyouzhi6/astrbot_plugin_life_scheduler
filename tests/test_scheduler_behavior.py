@@ -261,6 +261,9 @@ class SchedulerBehaviorTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(loaded.find_by_number(1)["id"], newer["id"])
             self.assertEqual(loaded.find_by_number(2)["id"], entry["id"])
             self.assertIsNone(loaded.find_by_number(3))
+            self.assertEqual(loaded.find_for_user_query("穿搭1")["id"], newer["id"])
+            self.assertEqual(loaded.find_for_user_query("1")["id"], newer["id"])
+            self.assertEqual(loaded.find_for_user_query(entry["id"])["id"], entry["id"])
 
     def test_manual_extra_supports_negative_constraints(self):
         generator, _ = self._generator()
