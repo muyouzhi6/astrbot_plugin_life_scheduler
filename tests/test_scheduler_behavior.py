@@ -40,7 +40,7 @@ def _install_astrbot_stubs():
 
 _install_astrbot_stubs()
 
-from core.data import ScheduleDataManager  # noqa: E402
+from core.data import ScheduleDataManager, WardrobeDataManager  # noqa: E402
 from core.generator import ScheduleContext, SchedulerGenerator  # noqa: E402
 from core.utils import build_character_state_injection, select_current_activity  # noqa: E402
 
@@ -62,21 +62,24 @@ class _Provider:
     def __init__(self, responses):
         self.responses = list(responses)
         self.prompts = []
+        self.image_urls = []
 
-    async def text_chat(self, prompt, session_id):
+    async def text_chat(self, prompt, session_id, image_urls=None):
         self.prompts.append(prompt)
+        self.image_urls.append(image_urls or [])
         text = self.responses.pop(0) if self.responses else ""
         return types.SimpleNamespace(completion_text=text)
 
 
 class _Context:
-    def __init__(self, provider):
+    def __init__(self, provider, providers=None):
         self.provider = provider
+        self.providers = providers or {}
         self.conversation_manager = _ConversationManager()
         self.persona_manager = _PersonaManager()
 
     def get_provider_by_id(self, provider_id):
-        return None
+        return self.providers.get(provider_id)
 
     def get_using_provider(self):
         return self.provider
@@ -192,6 +195,60 @@ class SchedulerBehaviorTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(data.outfit_style, "用户指定")
 
+    async def test_image_description_uses_image_provider_and_relaxes_random_style(self):
+        generator, provider = self._generator(
+            [
+                "整体风格：清爽通勤；上装：白色衬衫；下装：蓝色半裙；鞋袜：图片中未明确。",
+                '{"outfit_style":"图片指定","outfit":"白色衬衫搭配蓝色半裙。","schedule":"09:00 上班"}',
+            ]
+        )
+        data = await generator.generate_schedule(
+            datetime.datetime(2026, 5, 24),
+            extra="上班",
+            image_paths=["/tmp/outfit.jpg"],
+        )
+        self.assertEqual(data.status, "ok")
+        self.assertEqual(len(provider.image_urls), 2)
+        self.assertEqual(provider.image_urls[0], ["/tmp/outfit.jpg"])
+        self.assertEqual(provider.image_urls[1], [])
+
+    async def test_text_only_wardrobe_description_uses_main_provider(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            main_provider = _Provider(["主模型整理的文字穿搭方案"])
+            image_provider = _Provider(["不应调用视觉模型"])
+            config = _config()
+            config["image_provider"] = "vision"
+            context = _Context(main_provider, {"vision": image_provider})
+            generator = SchedulerGenerator(
+                context,
+                config,
+                ScheduleDataManager(Path(tmp) / "schedule_data.json"),
+            )
+
+            result = await generator._describe_images(
+                [], user_text="白衬衫搭配蓝色半裙"
+            )
+
+            self.assertEqual(result, "主模型整理的文字穿搭方案")
+            self.assertEqual(len(main_provider.image_urls), 1)
+            self.assertEqual(main_provider.image_urls[0], [])
+            self.assertEqual(image_provider.prompts, [])
+
+    def test_wardrobe_manager_persists_and_formats_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = WardrobeDataManager(Path(tmp) / "wardrobe.json")
+            entry = manager.add("白色衬衫搭配蓝色半裙", note="适合通勤")
+            loaded = WardrobeDataManager(Path(tmp) / "wardrobe.json")
+            self.assertEqual(loaded.find("蓝色半裙")["id"], entry["id"])
+            self.assertIn("适合通勤", loaded.for_prompt())
+            loaded.replace(entry["id"], "白色衬衫搭配蓝色半裙，赤足不穿鞋袜")
+            self.assertIn("赤足", loaded.for_prompt())
+
+            newer = loaded.add("黑色针织衫搭配灰色长裤")
+            self.assertEqual(loaded.find_by_number(1)["id"], newer["id"])
+            self.assertEqual(loaded.find_by_number(2)["id"], entry["id"])
+            self.assertIsNone(loaded.find_by_number(3))
+
     def test_manual_extra_supports_negative_constraints(self):
         generator, _ = self._generator()
         ok, reason = generator._validate_payload(
@@ -294,10 +351,7 @@ class SchedulerBehaviorTest(unittest.IsolatedAsyncioTestCase):
 
     def test_select_current_activity_uses_latest_started_entry(self):
         schedule = (
-            "☀️ 上午\n"
-            "- 08:00 起床洗漱\n"
-            "- 09:30 出门去咖啡店看书\n"
-            "- 14:00 去逛街\n"
+            "☀️ 上午\n- 08:00 起床洗漱\n- 09:30 出门去咖啡店看书\n- 14:00 去逛街\n"
         )
         now = datetime.datetime(2026, 5, 24, 9, 38)
         self.assertEqual(
@@ -318,10 +372,7 @@ class SchedulerBehaviorTest(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_select_current_activity_accepts_half_hour_cn_time(self):
-        schedule = (
-            "上午 9点半 出门去咖啡店看书\n"
-            "晚上 20点 回家整理照片\n"
-        )
+        schedule = "上午 9点半 出门去咖啡店看书\n晚上 20点 回家整理照片\n"
         now = datetime.datetime(2026, 5, 24, 9, 45)
         self.assertEqual(
             select_current_activity(schedule, now=now),
@@ -329,10 +380,7 @@ class SchedulerBehaviorTest(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_select_current_activity_accepts_numbered_items(self):
-        schedule = (
-            "1. 08:00 起床洗漱\n"
-            "2、09:30 出门去咖啡店看书\n"
-        )
+        schedule = "1. 08:00 起床洗漱\n2、09:30 出门去咖啡店看书\n"
         now = datetime.datetime(2026, 5, 24, 9, 45)
         self.assertEqual(
             select_current_activity(schedule, now=now),
@@ -340,10 +388,7 @@ class SchedulerBehaviorTest(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_select_current_activity_wraps_to_previous_day_when_needed(self):
-        schedule = (
-            "- 08:00 起床洗漱\n"
-            "- 23:00 窝在被子里看电影\n"
-        )
+        schedule = "- 08:00 起床洗漱\n- 23:00 窝在被子里看电影\n"
         now = datetime.datetime(2026, 5, 25, 2, 10)
         self.assertEqual(
             select_current_activity(schedule, now=now, wrap_previous_day=True),
@@ -355,11 +400,7 @@ class SchedulerBehaviorTest(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_character_state_injection_includes_current_activity(self):
-        schedule = (
-            "- 08:00 起床洗漱\n"
-            "- 09:30 出门去咖啡店看书\n"
-            "- 14:00 去逛街\n"
-        )
+        schedule = "- 08:00 起床洗漱\n- 09:30 出门去咖啡店看书\n- 14:00 去逛街\n"
         inject_text = build_character_state_injection(
             "黑丝和吊带裙",
             schedule,

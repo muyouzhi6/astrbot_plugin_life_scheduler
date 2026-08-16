@@ -33,6 +33,13 @@
     "_special": "select_provider",
     "default": ""
   },
+  "image_provider": {
+    "description": "指定图片转写使用的 LLM 供应商",
+    "hint": "留空则跟随生成日程的供应商；请单独选择支持图像输入的 provider，以兼容纯文本主模型。",
+    "type": "string",
+    "_special": "select_provider",
+    "default": ""
+  },
   "pool": {
     "description": "创意池",
     "hint": "每次生成日程时，各个池会随机选择一个来并入日程生成提示词",
