@@ -1,4 +1,5 @@
 import datetime
+import json
 import sys
 import tempfile
 import types
@@ -90,6 +91,8 @@ def _config():
         "reference_history_days": 3,
         "reference_recent_count": 0,
         "llm_provider": "",
+        "wardrobe": [],
+        "wardrobe_migration_version": 0,
         "pool": {
             "daily_themes": ["探索日"],
             "mood_colors": ["活力"],
@@ -121,6 +124,10 @@ def _ctx():
         daily_theme="探索日",
         mood_color="活力",
         outfit_style="甜酷混搭风",
+        outfit_plan=(
+            "整体风格：甜酷混搭风；服装：未明确；鞋袜：未明确；"
+            "配饰：未明确；发型：未明确；妆容：未明确。"
+        ),
         schedule_type="户外活动型",
     )
 
@@ -130,7 +137,20 @@ class SchedulerBehaviorTest(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         data_mgr = ScheduleDataManager(Path(self.tmp.name) / "schedule_data.json")
         provider = _Provider(responses)
-        return SchedulerGenerator(_Context(provider), _config(), data_mgr), provider
+        config = _config()
+        wardrobe_mgr = WardrobeDataManager(
+            Path(self.tmp.name) / "wardrobe.json",
+            config,
+        )
+        return (
+            SchedulerGenerator(
+                _Context(provider),
+                config,
+                data_mgr,
+                wardrobe_mgr,
+            ),
+            provider,
+        )
 
     def tearDown(self):
         tmp = getattr(self, "tmp", None)
@@ -211,7 +231,12 @@ class SchedulerBehaviorTest(unittest.IsolatedAsyncioTestCase):
     async def test_image_description_uses_image_provider_and_relaxes_random_style(self):
         generator, provider = self._generator(
             [
-                "整体风格：清爽通勤；上装：白色衬衫；下装：蓝色半裙；鞋袜：图片中未明确。",
+                (
+                    '{"overall_style":"清爽通勤","clothing":"白色衬衫搭配蓝色半裙",'
+                    '"footwear":"","accessories":"","hair":"","makeup":"",'
+                    '"details":"","constraints":"","scene":"咖啡馆",'
+                    '"pose":"坐着","camera":"高角度"}'
+                ),
                 '{"outfit_style":"图片指定","outfit":"白色衬衫搭配蓝色半裙。","schedule":"09:00 上班"}',
             ]
         )
@@ -224,10 +249,42 @@ class SchedulerBehaviorTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(provider.image_urls), 2)
         self.assertEqual(provider.image_urls[0], ["/tmp/outfit.jpg"])
         self.assertEqual(provider.image_urls[1], [])
+        self.assertIn("必须排除", provider.prompts[0])
+
+    async def test_wardrobe_transcription_discards_non_outfit_json_fields(self):
+        generator, _ = self._generator(
+            [
+                (
+                    '{"overall_style":"清爽","clothing":"白色短袖搭配蓝色半裙",'
+                    '"footwear":"赤足","accessories":"银色项链",'
+                    '"hair":"低马尾","makeup":"淡妆","details":"棉质、合身版型",'
+                    '"constraints":"不穿鞋袜","scene":"海边","pose":"挥手",'
+                    '"camera":"俯拍","weather":"晴天"}'
+                )
+            ]
+        )
+
+        result = await generator._describe_images(["/tmp/look.jpg"])
+
+        self.assertIn("白色短袖", result)
+        self.assertIn("赤足", result)
+        self.assertIn("不穿鞋袜", result)
+        self.assertNotIn("海边", result)
+        self.assertNotIn("挥手", result)
+        self.assertNotIn("俯拍", result)
+        self.assertNotIn("晴天", result)
 
     async def test_text_only_wardrobe_description_uses_main_provider(self):
         with tempfile.TemporaryDirectory() as tmp:
-            main_provider = _Provider(["主模型整理的文字穿搭方案"])
+            main_provider = _Provider(
+                [
+                    (
+                        '{"overall_style":"通勤","clothing":"白衬衫搭配蓝色半裙",'
+                        '"footwear":"","accessories":"","hair":"","makeup":"",'
+                        '"details":"","constraints":"","scene":"公司"}'
+                    )
+                ]
+            )
             image_provider = _Provider(["不应调用视觉模型"])
             config = _config()
             config["image_provider"] = "vision"
@@ -242,28 +299,104 @@ class SchedulerBehaviorTest(unittest.IsolatedAsyncioTestCase):
                 [], user_text="白衬衫搭配蓝色半裙"
             )
 
-            self.assertEqual(result, "主模型整理的文字穿搭方案")
+            self.assertIn("白衬衫搭配蓝色半裙", result)
+            self.assertNotIn("公司", result)
             self.assertEqual(len(main_provider.image_urls), 1)
             self.assertEqual(main_provider.image_urls[0], [])
             self.assertEqual(image_provider.prompts, [])
 
     def test_wardrobe_manager_persists_and_formats_entries(self):
         with tempfile.TemporaryDirectory() as tmp:
-            manager = WardrobeDataManager(Path(tmp) / "wardrobe.json")
+            config = {
+                "wardrobe": [],
+                "wardrobe_migration_version": 1,
+                "pool": {"outfit_styles": []},
+            }
+            manager = WardrobeDataManager(Path(tmp) / "wardrobe.json", config)
             entry = manager.add("白色衬衫搭配蓝色半裙", note="适合通勤")
-            loaded = WardrobeDataManager(Path(tmp) / "wardrobe.json")
+            loaded = WardrobeDataManager(Path(tmp) / "wardrobe.json", config)
             self.assertEqual(loaded.find("蓝色半裙")["id"], entry["id"])
-            self.assertIn("适合通勤", loaded.for_prompt())
+            self.assertNotIn("适合通勤", loaded.for_prompt())
             loaded.replace(entry["id"], "白色衬衫搭配蓝色半裙，赤足不穿鞋袜")
             self.assertIn("赤足", loaded.for_prompt())
 
             newer = loaded.add("黑色针织衫搭配灰色长裤")
-            self.assertEqual(loaded.find_by_number(1)["id"], newer["id"])
-            self.assertEqual(loaded.find_by_number(2)["id"], entry["id"])
+            self.assertEqual(
+                loaded.find_by_number(1)["description"],
+                "白色衬衫搭配蓝色半裙，赤足不穿鞋袜",
+            )
+            self.assertEqual(loaded.find_by_number(2)["id"], newer["id"])
             self.assertIsNone(loaded.find_by_number(3))
-            self.assertEqual(loaded.find_for_user_query("穿搭1")["id"], newer["id"])
-            self.assertEqual(loaded.find_for_user_query("1")["id"], newer["id"])
-            self.assertEqual(loaded.find_for_user_query(entry["id"])["id"], entry["id"])
+            self.assertEqual(loaded.find_for_user_query("穿搭2")["id"], newer["id"])
+            self.assertEqual(loaded.find_for_user_query("2")["id"], newer["id"])
+            self.assertEqual(config["wardrobe"][-1], newer["description"])
+
+    def test_wardrobe_migration_freezes_numbers_and_appends_legacy_styles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "wardrobe.json"
+            path.write_text(
+                json.dumps(
+                    [
+                        {"id": "old", "description": "原先显示为穿搭2"},
+                        {"id": "new", "description": "原先显示为穿搭1"},
+                    ],
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            config = {
+                "wardrobe": [],
+                "wardrobe_migration_version": 0,
+                "pool": {"outfit_styles": ["甜酷混搭风"]},
+            }
+
+            manager = WardrobeDataManager(path, config)
+
+            self.assertEqual(
+                [entry["description"] for entry in manager.display_entries()],
+                [
+                    "原先显示为穿搭1",
+                    "原先显示为穿搭2",
+                    (
+                        "整体风格：甜酷混搭风；服装：未明确；鞋袜：未明确；"
+                        "配饰：未明确；发型：未明确；妆容：未明确。"
+                    ),
+                ],
+            )
+            self.assertEqual(config["wardrobe_migration_version"], 1)
+            self.assertEqual(config["pool"]["outfit_styles"], [])
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), [])
+
+            reloaded = WardrobeDataManager(path, config)
+            reloaded.add("后来新增的穿搭")
+            self.assertEqual(
+                reloaded.find_by_number(4)["description"], "后来新增的穿搭"
+            )
+
+    def test_schedule_diversity_uses_wardrobe_instead_of_legacy_style_pool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config()
+            config["wardrobe_migration_version"] = 1
+            config["wardrobe"] = [
+                "整体风格：清爽通勤；服装：白色衬衫搭配蓝色半裙；鞋袜：白色乐福鞋。"
+            ]
+            config["pool"]["outfit_styles"] = ["不应使用的旧风格"]
+            wardrobe_mgr = WardrobeDataManager(
+                Path(tmp) / "wardrobe.json",
+                config,
+            )
+            generator = SchedulerGenerator(
+                _Context(_Provider([])),
+                config,
+                ScheduleDataManager(Path(tmp) / "schedule_data.json"),
+                wardrobe_mgr,
+            )
+
+            diversity = generator._pick_diversity()
+
+            self.assertEqual(diversity["outfit_style"], "清爽通勤")
+            self.assertIn("白色衬衫", diversity["outfit_plan"])
+            self.assertNotIn("不应使用", diversity["outfit_plan"])
 
     def test_manual_extra_supports_negative_constraints(self):
         generator, _ = self._generator()

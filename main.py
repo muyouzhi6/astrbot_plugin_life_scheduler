@@ -27,7 +27,10 @@ class LifeSchedulerPlugin(Star):
 
     async def initialize(self):
         self.data_mgr = ScheduleDataManager(self.schedule_data_file)
-        self.wardrobe_mgr = WardrobeDataManager(self.wardrobe_data_file)
+        self.wardrobe_mgr = WardrobeDataManager(
+            self.wardrobe_data_file,
+            self.config,
+        )
         self.generator = SchedulerGenerator(
             self.context,
             self.config,
@@ -166,10 +169,11 @@ class LifeSchedulerPlugin(Star):
         wardrobe_text = self.wardrobe_mgr.for_prompt(limit=20, max_chars=8000)
         wardrobe_instructions = (
             "\n<life_wardrobe>\n"
-            "这是插件保存的备选穿搭方案，仅在用户谈到衣柜或某套穿搭时使用。\n"
+            "这是插件保存的备选穿搭方案，编号按配置顺序固定，新方案追加到末尾。\n"
             f"{wardrobe_text}\n"
             "当用户要查看、删除或修改某套方案时，先调用 life_wardrobe_list 获取最新编号和完整描述，"
-            "再调用对应的衣柜工具；用户明确要求加入衣柜时调用 life_wardrobe_add。\n"
+            "再调用对应的衣柜工具；用户明确要求加入衣柜时调用 life_wardrobe_add。"
+            "衣柜只保存服装、鞋袜、配饰、发型、妆容和造型细节，不得把场景、动作、日程、天气或镜头描述当作穿搭传入。\n"
             "当用户要求修改今天的穿搭或日程时调用 life_schedule_edit。除非用户明确提出，不要主动改写或删除数据。\n"
             "</life_wardrobe>\n"
         )
@@ -260,7 +264,7 @@ class LifeSchedulerPlugin(Star):
                 user_text=note,
                 sid=f"life_wardrobe_vision_{event.session_id}",
             )
-            entry = self.wardrobe_mgr.add(description, note=note)
+            entry = self.wardrobe_mgr.add(description)
         except Exception as exc:
             logger.error("Failed to add wardrobe entry: %s", exc)
             yield event.plain_result(f"放进衣柜失败：{exc}")
@@ -271,7 +275,7 @@ class LifeSchedulerPlugin(Star):
     @filter.command("查看衣柜", alias={"life wardrobe show"})
     async def wardrobe_show(self, event: AstrMessageEvent):
         """查看已保存的穿搭方案。"""
-        entries = self.wardrobe_mgr.display_entries(limit=20)
+        entries = self.wardrobe_mgr.display_entries()
         if not entries:
             yield event.plain_result("衣柜还是空的")
             return
@@ -317,7 +321,6 @@ class LifeSchedulerPlugin(Star):
     .content { flex: 1; min-width: 0; }
     .entry-title { margin: 2px 0 10px; font-size: 22px; }
     .description { margin: 0; font-size: 17px; line-height: 1.7; white-space: pre-wrap; }
-    .note { margin: 12px 0 0; color: #766f68; font-size: 14px; }
   </style>
 </head>
 <body>
@@ -331,7 +334,6 @@ class LifeSchedulerPlugin(Star):
     <div class="content">
       <h2 class="entry-title">穿搭 {{ loop.index }}</h2>
       <p class="description">{{ entry.description }}</p>
-      {% if entry.note %}<p class="note">备注：{{ entry.note }}</p>{% endif %}
     </div>
   </section>
   {% endfor %}
@@ -360,20 +362,17 @@ class LifeSchedulerPlugin(Star):
         self,
         event: AstrMessageEvent,
         description: str = "",
-        note: str = "",
     ) -> str:
-        """把当前消息中的穿搭图片或文字整理后加入衣柜。
+        """把当前消息中的穿搭图片或造型事实整理后加入衣柜。
 
         Args:
-            description(string): 要加入衣柜的穿搭描述；如果当前消息有图片，可以为空。
-            note(string): 用户对要加入衣柜的穿搭补充说明，可以为空。
+            description(string): 只填写服装、鞋袜、配饰、发型、妆容、颜色材质、版型搭配和赤足等穿戴约束。禁止填写场景、地点、天气、时间、动作、姿势、活动、日程、镜头、构图、光线或氛围。当前消息或引用消息有图片时可以为空。
         """
         if not event.is_admin():
             return "未执行：只有管理员可以修改衣柜。"
         image_paths = await self._collect_image_paths(event)
         description = str(description or "").strip()
-        note = str(note or "").strip()
-        request_text = "；".join(item for item in (description, note) if item)
+        request_text = description
 
         if not image_paths and not request_text:
             today = resolve_business_now(self.config.get("schedule_time"))
@@ -385,21 +384,12 @@ class LifeSchedulerPlugin(Star):
                     "未执行：当前消息没有穿搭图片或文字描述，也没有可复用的今日穿搭。"
                 )
         try:
-            if image_paths:
-                normalized = await self.generator._describe_images(
-                    image_paths,
-                    user_text=request_text,
-                    sid=f"life_wardrobe_tool_{event.session_id}",
-                )
-            else:
-                normalized = await self.generator._call_llm(
-                    "请把下面的穿搭文字整理成可长期复用的详细穿搭方案，只输出纯文本，不要 Markdown、JSON、解释或寒暄。\n"
-                    "按整体风格、上装、下装、外套、鞋袜、配饰、颜色材质、版型与搭配关系详细描述；"
-                    "保留原文中的明确约束，不要臆造原文没有的信息。\n"
-                    f"原始穿搭：{request_text}",
-                    sid=f"life_wardrobe_tool_{event.session_id}",
-                )
-            entry = self.wardrobe_mgr.add(normalized, note=note)
+            normalized = await self.generator._describe_images(
+                image_paths,
+                user_text=request_text,
+                sid=f"life_wardrobe_tool_{event.session_id}",
+            )
+            entry = self.wardrobe_mgr.add(normalized)
         except Exception as exc:
             logger.error("LLM wardrobe add failed: %s", exc)
             return f"衣柜写入失败：{exc}"
@@ -412,10 +402,8 @@ class LifeSchedulerPlugin(Star):
         entries = self.wardrobe_mgr.all()
         if not entries:
             return "衣柜为空。"
-        lines = ["衣柜方案（最新在前）："]
-        for index, entry in enumerate(
-            self.wardrobe_mgr.display_entries(limit=20), start=1
-        ):
+        lines = ["衣柜方案（固定编号顺序）："]
+        for index, entry in enumerate(self.wardrobe_mgr.display_entries(), start=1):
             lines.append(f"{index}. id={entry['id']}；{entry['description']}")
         return "\n".join(lines)
 
@@ -453,15 +441,15 @@ class LifeSchedulerPlugin(Star):
         if entry is None:
             return f"没有找到匹配的衣柜方案：{query}"
 
-        prompt = (
-            "请编辑下面的穿搭方案，只输出编辑后的完整纯文本方案，不要 Markdown 或解释。\n"
-            f"原方案：{entry['description']}\n"
-            f"用户修改要求：{instruction}\n"
-            "保留未被要求修改的细节，明确落实用户要求；如果要求裸足，必须明确写出不穿鞋袜、赤足。"
-        )
         try:
-            description = await self.generator._call_llm(
-                prompt,
+            description = await self.generator._describe_images(
+                [],
+                user_text=(
+                    "请根据修改要求更新原方案，保留未被要求修改的造型细节。"
+                    "如果要求裸足，必须在穿戴约束中明确写出赤足、不穿鞋袜。\n"
+                    f"原方案：{entry['description']}\n"
+                    f"用户修改要求：{instruction}"
+                ),
                 sid=f"life_wardrobe_edit_{event.session_id}",
             )
             updated = self.wardrobe_mgr.replace(entry["id"], description)

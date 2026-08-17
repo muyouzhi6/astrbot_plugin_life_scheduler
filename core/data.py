@@ -1,5 +1,7 @@
 import datetime
+import hashlib
 import json
+import logging
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -149,15 +151,75 @@ class ScheduleDataManager:
 
 
 class WardrobeDataManager:
-    """Persist normalized outfit plans independently from daily schedules."""
+    """Persist normalized outfit plans in the plugin configuration."""
 
-    def __init__(self, json_path: Path):
+    def __init__(self, json_path: Path, config: dict | None = None):
         self._path = json_path
+        self._config = config
         self._entries: list[dict[str, str]] = []
         self.load()
 
     def load(self) -> None:
-        """Load wardrobe entries, tolerating missing or malformed files."""
+        """Load wardrobe entries and migrate legacy sources when configured."""
+        if self._config is not None:
+            configured = self._normalize_descriptions(self._config.get("wardrobe", []))
+            migration_version = int(
+                self._config.get("wardrobe_migration_version", 0) or 0
+            )
+            if migration_version < 1:
+                legacy_descriptions: list[str] = []
+                legacy_file_valid = True
+                if self._path.exists():
+                    try:
+                        raw = json.loads(self._path.read_text(encoding="utf-8"))
+                        if not isinstance(raw, list):
+                            raise ValueError("legacy wardrobe root is not a list")
+                        for item in reversed(raw):
+                            if not isinstance(item, dict):
+                                continue
+                            description = str(item.get("description", "")).strip()
+                            if description:
+                                legacy_descriptions.append(description)
+                    except Exception as exc:
+                        legacy_file_valid = False
+                        logging.getLogger("astrbot").error(
+                            "Legacy wardrobe migration skipped for malformed file: %s",
+                            exc,
+                        )
+
+                legacy_styles = self._normalize_descriptions(
+                    self._config.get("pool", {}).get("outfit_styles", [])
+                )
+                migrated_styles = [
+                    (
+                        f"整体风格：{style}；服装：未明确；鞋袜：未明确；"
+                        "配饰：未明确；发型：未明确；妆容：未明确。"
+                    )
+                    for style in legacy_styles
+                ]
+                configured = self._normalize_descriptions(
+                    legacy_descriptions + configured + migrated_styles
+                )
+                self._config["wardrobe"] = configured
+                pool = self._config.get("pool")
+                if isinstance(pool, dict):
+                    pool["outfit_styles"] = []
+                if legacy_file_valid:
+                    self._config["wardrobe_migration_version"] = 1
+
+                save_config = getattr(self._config, "save_config", None)
+                if callable(save_config):
+                    save_config()
+                if legacy_file_valid and self._path.exists():
+                    tmp_path = self._path.with_suffix(".tmp")
+                    tmp_path.write_text("[]\n", encoding="utf-8")
+                    tmp_path.replace(self._path)
+
+            self._entries = [
+                self._build_entry(description) for description in configured
+            ]
+            return
+
         if not self._path.exists():
             self._entries = []
             return
@@ -189,12 +251,55 @@ class WardrobeDataManager:
             )
         self._entries = entries
 
+    @staticmethod
+    def _normalize_descriptions(values: object) -> list[str]:
+        """Normalize a configuration list while preserving its visible order.
+
+        Args:
+            values: Candidate wardrobe descriptions.
+
+        Returns:
+            Non-empty unique descriptions in input order.
+        """
+        if not isinstance(values, list):
+            return []
+        descriptions: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            if isinstance(value, dict):
+                value = value.get("description", "")
+            description = str(value or "").strip()
+            canonical = description.casefold()
+            if not description or canonical in seen:
+                continue
+            seen.add(canonical)
+            descriptions.append(description)
+        return descriptions
+
+    @staticmethod
+    def _build_entry(description: str) -> dict[str, str]:
+        """Build the runtime view of one configured wardrobe entry.
+
+        Args:
+            description: Normalized outfit-only description.
+
+        Returns:
+            A dictionary compatible with existing wardrobe callers.
+        """
+        digest = hashlib.sha256(description.encode("utf-8")).hexdigest()[:16]
+        return {
+            "id": f"wardrobe-{digest}",
+            "created_at": "",
+            "description": description,
+            "note": "",
+        }
+
     def add(self, description: str, *, note: str = "") -> dict[str, str]:
         """Add one normalized outfit plan and persist it atomically.
 
         Args:
             description: Detailed outfit description produced by the vision model.
-            note: Optional user text sent with the image.
+            note: Deprecated source text. It is intentionally not persisted.
 
         Returns:
             The persisted wardrobe entry.
@@ -206,12 +311,13 @@ class WardrobeDataManager:
         if not description:
             raise ValueError("Wardrobe description cannot be empty")
 
-        entry = {
-            "id": datetime.datetime.now().strftime("%Y%m%d%H%M%S%f"),
-            "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
-            "description": description,
-            "note": str(note or "").strip(),
-        }
+        del note
+        canonical = description.casefold()
+        for entry in self._entries:
+            if entry["description"].casefold() == canonical:
+                return dict(entry)
+
+        entry = self._build_entry(description)
         self._entries.append(entry)
         self.save()
         return dict(entry)
@@ -220,23 +326,26 @@ class WardrobeDataManager:
         """Return a shallow copy of all wardrobe entries."""
         return [dict(entry) for entry in self._entries]
 
-    def display_entries(self, *, limit: int = 20) -> list[dict[str, str]]:
-        """Return entries in the same newest-first order shown to users.
+    def display_entries(self, *, limit: int | None = None) -> list[dict[str, str]]:
+        """Return entries in stable configured order.
 
         Args:
-            limit: Maximum number of recent entries to expose.
+            limit: Optional maximum number of entries to expose.
 
         Returns:
-            Copies of recent entries ordered for display, newest first.
+            Copies ordered exactly as their stable user-facing numbering.
         """
-        return [dict(entry) for entry in reversed(self._entries[-limit:])]
+        entries = self._entries if limit is None else self._entries[:limit]
+        return [dict(entry) for entry in entries]
 
-    def find_by_number(self, number: int, *, limit: int = 20) -> dict[str, str] | None:
+    def find_by_number(
+        self, number: int, *, limit: int | None = None
+    ) -> dict[str, str] | None:
         """Find an entry by its one-based number in the display list.
 
         Args:
             number: One-based number shown in the wardrobe image.
-            limit: Number of recent entries included in the display list.
+            limit: Optional number of entries included in the display list.
 
         Returns:
             The matching entry, or None when the number is out of range.
@@ -249,11 +358,11 @@ class WardrobeDataManager:
         return entries[number - 1]
 
     def find(self, query: str) -> dict[str, str] | None:
-        """Find the newest entry whose id or description contains a query."""
+        """Find the first configured entry matching an id or description query."""
         query = str(query or "").strip().casefold()
         if not query:
             return None
-        for entry in reversed(self._entries):
+        for entry in self._entries:
             if (
                 query in entry["id"].casefold()
                 or query in entry["description"].casefold()
@@ -262,14 +371,14 @@ class WardrobeDataManager:
         return None
 
     def find_for_user_query(
-        self, query: str, *, limit: int = 20
+        self, query: str, *, limit: int | None = None
     ) -> dict[str, str] | None:
         """Resolve a user-facing wardrobe number or a stable query.
 
         Args:
             query: Display number such as ``穿搭2``/``2``, a stable entry ID,
                 or a description keyword.
-            limit: Number of recent entries exposed as display numbers.
+            limit: Optional number of entries exposed as display numbers.
 
         Returns:
             The matching wardrobe entry, or ``None`` when no entry matches.
@@ -278,10 +387,9 @@ class WardrobeDataManager:
         query_match = re.fullmatch(r"(穿搭\s*)?(\d+)", query_text)
         if query_match:
             number = int(query_match.group(2))
-            if query_match.group(1) or number <= limit:
-                numbered = self.find_by_number(number, limit=limit)
-                if numbered is not None or query_match.group(1):
-                    return numbered
+            numbered = self.find_by_number(number, limit=limit)
+            if numbered is not None or query_match.group(1):
+                return numbered
         return self.find(query_text)
 
     def replace(
@@ -292,7 +400,7 @@ class WardrobeDataManager:
         Args:
             entry_id: Stable wardrobe entry identifier.
             description: New normalized outfit description.
-            note: Optional replacement note.
+            note: Deprecated source text. It is intentionally not persisted.
 
         Returns:
             The updated entry.
@@ -304,11 +412,19 @@ class WardrobeDataManager:
         description = str(description or "").strip()
         if not description:
             raise ValueError("Wardrobe description cannot be empty")
+        del note
+        canonical = description.casefold()
+        for entry in self._entries:
+            if (
+                entry["id"] != str(entry_id)
+                and entry["description"].casefold() == canonical
+            ):
+                raise ValueError("Wardrobe description already exists")
         for entry in self._entries:
             if entry["id"] != str(entry_id):
                 continue
-            entry["description"] = description
-            entry["note"] = str(note or "").strip()
+            replacement = self._build_entry(description)
+            entry.update(replacement)
             self.save()
             return dict(entry)
         raise KeyError(entry_id)
@@ -324,19 +440,25 @@ class WardrobeDataManager:
         raise KeyError(entry_id)
 
     def for_prompt(self, *, limit: int = 20, max_chars: int = 12000) -> str:
-        """Format recent wardrobe entries for schedule generation."""
+        """Format wardrobe entries without leaking source notes."""
         if not self._entries:
             return "（衣柜为空）"
 
         lines: list[str] = []
         for index, entry in enumerate(self.display_entries(limit=limit), start=1):
-            note = f"；用户备注：{entry['note']}" if entry.get("note") else ""
-            lines.append(f"{index}. {entry['description']}{note}")
+            lines.append(f"{index}. {entry['description']}")
         text = "\n".join(lines)
         return text[:max_chars]
 
     def save(self) -> None:
-        """Persist entries with an atomic replace."""
+        """Persist entries to configuration or the legacy JSON fallback."""
+        if self._config is not None:
+            self._config["wardrobe"] = [entry["description"] for entry in self._entries]
+            save_config = getattr(self._config, "save_config", None)
+            if callable(save_config):
+                save_config()
+            return
+
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self._path.with_suffix(".tmp")
         tmp_path.write_text(

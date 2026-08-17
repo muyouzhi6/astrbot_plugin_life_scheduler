@@ -46,9 +46,21 @@
     "_special": "select_provider",
     "default": ""
   },
+  "wardrobe": {
+    "description": "衣柜穿搭方案",
+    "hint": "每项只填写可复用的服装、鞋袜、配饰、发型、妆容、颜色材质、版型和穿戴约束。顺序就是‘穿搭N’的编号，新方案会追加到末尾。不要填写场景、动作、日程或镜头描述。",
+    "type": "list",
+    "default": []
+  },
+  "wardrobe_migration_version": {
+    "description": "Wardrobe migration version",
+    "type": "int",
+    "default": 0,
+    "invisible": true
+  },
   "pool": {
     "description": "创意池",
-    "hint": "每次生成日程时，各个池会随机选择一个来并入日程生成提示词",
+    "hint": "每次生成日程时，今日主题、心情色彩和日程类型会各随机选择一项",
     "type": "object",
     "items": {
       "daily_themes": {
@@ -88,25 +100,11 @@
         ]
       },
       "outfit_styles": {
-        "description": "穿搭风格池",
+        "description": "旧版穿搭风格池",
+        "hint": "仅用于升级迁移，插件启动后会自动转入衣柜并清空。",
         "type": "list",
-        "default": [
-          "知性学院风",
-          "街头休闲风",
-          "温柔淑女风",
-          "酷飒中性风",
-          "慵懒居家风",
-          "精致约会风",
-          "运动活力风",
-          "日系森女风",
-          "法式优雅风",
-          "韩系甜美风",
-          "复古文艺风",
-          "极简都市风",
-          "甜酷混搭风",
-          "民族风情风",
-          "暗黑系风格"
-        ]
+        "invisible": true,
+        "default": []
       },
       "schedule_types": {
         "description": "日程类型池",
@@ -130,12 +128,12 @@
   },
   "prompt_template": {
     "description": "LLM 生成日程的完整 Prompt 模板",
-    "hint":"插件内部支持格式化的占位符有： {date_str}、{weekday}、{holiday}、{persona_desc}、{daily_theme}、{mood_color}、{outfit_style}、{schedule_type}、{history_schedules}、{recent_chats}，其他占位符默认会被替换为空字符串",
+    "hint":"插件内部支持格式化的占位符有： {date_str}、{weekday}、{holiday}、{persona_desc}、{daily_theme}、{mood_color}、{outfit_style}、{outfit_plan}、{schedule_type}、{history_schedules}、{recent_chats}，其他占位符默认会被替换为空字符串",
     "type": "text",
     "obvious_hint": true,
     "editor_mode": true,
     "editor_language": "markdown",
     "editor_theme": "vs-dark",
-    "default": "# Role: Life Scheduler\n请根据以下信息，为自己规划一份今天的生活安排。\n\n## Context\n- 日期：{date_str} {weekday} {holiday}\n- 人设：{persona_desc}\n\n## 🎲 今日创意约束（必须遵循）\n- 今日主题：【{daily_theme}】\n- 心情色彩：【{mood_color}】\n- 穿搭风格（必须严格遵循）：【{outfit_style}】\n- 日程类型：【{schedule_type}】\n\n## 🚫 需要避免的重复内容\n{history_schedules}\n\n## 💡 参考信息\n{recent_chats}\n\n## 强制约束（必须严格遵循）\n- 你必须严格遵循穿搭风格：【{outfit_style}】（不得替换/混用其他风格）。\n- 你必须只输出 JSON 对象本体（不要 Markdown/代码块/解释）。\n- JSON 必须包含字段 \"outfit_style\"，且其值必须严格等于 \"{outfit_style}\"。\n- 字段 \"outfit\" 的第一行必须以 \"风格：{outfit_style}\" 开头。\n\n## Tasks\n1. outfit: 今日穿搭描述（从里到外、从上到下、衣裤内衣裤鞋袜、饰品等，符合天气和心情）\n2. schedule: 规划今日日程。\n\n## Output Format\n请严格返回 JSON：\n{{\n  \"outfit_style\": \"{outfit_style}\",\n  \"outfit\": \"...\",\n  \"schedule\": \"...\"\n}}"
+    "default": "# Role: Life Scheduler\n请根据以下信息，为自己规划一份今天的生活安排。\n\n## Context\n- 日期：{date_str} {weekday} {holiday}\n- 人设：{persona_desc}\n\n## 今日创意约束\n- 今日主题：【{daily_theme}】\n- 心情色彩：【{mood_color}】\n- 日程类型：【{schedule_type}】\n\n## 今日选定衣柜方案\n{outfit_plan}\n\n## 需要避免的重复内容\n{history_schedules}\n\n## 参考信息\n{recent_chats}\n\n## 强制约束\n- outfit 必须落实今日选定衣柜方案中已明确的服装、鞋袜、配饰、发型、妆容和穿戴约束，不得替换已明确的单品。\n- 你必须只输出 JSON 对象本体，不要 Markdown、代码块或解释。\n- JSON 必须包含 \"outfit_style\"、\"outfit\"、\"schedule\" 三个字段。\n- \"outfit_style\" 必须严格等于 \"{outfit_style}\"，\"outfit\" 第一行必须以 \"风格：{outfit_style}\" 开头。\n\n## Output Format\n{{\n  \"outfit_style\": \"{outfit_style}\",\n  \"outfit\": \"...\",\n  \"schedule\": \"...\"\n}}"
   }
 }

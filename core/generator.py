@@ -29,6 +29,7 @@ class ScheduleContext:
     daily_theme: str
     mood_color: str
     outfit_style: str
+    outfit_plan: str
     schedule_type: str
     wardrobe: str = ""
     image_description: str = ""
@@ -163,7 +164,7 @@ class SchedulerGenerator:
                 else "（衣柜为空）"
             ),
             image_description=image_description,
-            **self._pick_diversity(data.date()),
+            **self._pick_diversity(),
         )
 
     def _resolve_reference_umo(self, umo: str | None) -> str | None:
@@ -199,39 +200,38 @@ class SchedulerGenerator:
             return ""
         return ""
 
-    def _pick_diversity(self, today: datetime.date) -> dict:
+    def _pick_diversity(self) -> dict:
         pool = self.config["pool"]
+        wardrobe_entries = (
+            self.wardrobe_mgr.all() if self.wardrobe_mgr is not None else []
+        )
+        outfit_plan = (
+            random.choice(wardrobe_entries)["description"]
+            if wardrobe_entries
+            else "衣柜为空；请根据人设自由设计完整的服装、鞋袜、配饰、发型和妆容。"
+        )
         return {
             "daily_theme": random.choice(pool["daily_themes"]),
             "mood_color": random.choice(pool["mood_colors"]),
-            "outfit_style": self._pick_outfit_style(pool["outfit_styles"], today),
+            "outfit_style": self._extract_style_from_plan(outfit_plan),
+            "outfit_plan": outfit_plan,
             "schedule_type": random.choice(pool["schedule_types"]),
         }
 
-    def _pick_outfit_style(self, styles: list[str], today: datetime.date) -> str:
-        styles = list(styles or [])
-        if not styles:
-            return ""
+    @staticmethod
+    def _extract_style_from_plan(outfit_plan: str) -> str:
+        """Extract a short style label from a detailed wardrobe plan.
 
-        lookback_days = int(self.config.get("reference_history_days", 0) or 0)
-        if lookback_days <= 0 or len(styles) <= 1:
-            return random.choice(styles)
+        Args:
+            outfit_plan: Selected wardrobe description.
 
-        used: set[str] = set()
-        for i in range(1, lookback_days + 1):
-            date = today - datetime.timedelta(days=i)
-            data = self.data_mgr.get(date)
-            if not data or data.status != "ok":
-                continue
-
-            style = (getattr(data, "outfit_style", "") or "").strip()
-            if not style:
-                style = self._extract_style_from_outfit(data.outfit)
-            if style:
-                used.add(style)
-
-        candidates = [s for s in styles if s not in used]
-        return random.choice(candidates or styles)
+        Returns:
+            A concise style label used by the existing schedule data contract.
+        """
+        match = re.search(r"(?:整体风格|风格)\s*[:：]\s*([^；;\n。]+)", outfit_plan)
+        if match:
+            return match.group(1).strip()
+        return "自由搭配" if "衣柜为空" in outfit_plan else "衣柜方案"
 
     def _extract_style_from_outfit(self, outfit: str) -> str:
         if not outfit:
@@ -429,6 +429,7 @@ class SchedulerGenerator:
         has_user_outfit = bool(extra or ctx.image_description)
         if has_user_outfit:
             ctx_dict["outfit_style"] = "用户指定"
+            ctx_dict["outfit_plan"] = "用户本次指定"
             ctx_dict["schedule_type"] = "用户指定"
 
         template = self._get_prompt_template()
@@ -447,12 +448,12 @@ class SchedulerGenerator:
             ctx_dict[k] = ""
         prompt = self._render_prompt_template(template, ctx_dict)
 
-        if ctx.wardrobe:
+        if not has_user_outfit:
             prompt += (
-                "\n\n## 衣柜中的穿搭方案（可优先参考）\n"
-                f"{ctx.wardrobe}\n"
-                "- 日常生成时优先从衣柜方案中选择或组合，保持衣物细节一致。\n"
-                "- 如果用户提供了图片或文字要求，以用户本次要求为最高优先级。\n"
+                "\n\n## 今日选定的衣柜方案（必须落实）\n"
+                f"{ctx.outfit_plan}\n"
+                "- 这是今日唯一的穿搭基准，outfit 必须落实其中已明确的服装、鞋袜、配饰、发型、妆容和穿戴约束。\n"
+                "- 标记为‘未明确’的项可以按整体风格补全，不得换掉已明确的单品。\n"
             )
 
         if ctx.image_description:
@@ -585,10 +586,13 @@ class SchedulerGenerator:
             RuntimeError: If no provider is available or completion is empty.
         """
         prompt = (
-            "你是穿搭档案整理员。请根据用户提供的图片和文字，整理一份可长期复用的穿搭方案。\n"
-            "请只输出纯文本，不要 Markdown、JSON、寒暄或免责声明。\n"
-            "按‘整体风格；上装；下装；外套；鞋袜；配饰；颜色与材质；版型与搭配关系’的顺序，"
-            "尽可能详细描述图片中确实可见的内容。看不清的细节写‘图片中未明确’，不要猜测。\n"
+            "你是穿搭档案整理员。请从用户提供的图片和文字中，只提取可长期复用的外观造型。\n"
+            "只允许保留：整体穿搭风格；内搭、上装、下装、外套；鞋袜；包、首饰、帽子等配饰；发型；妆容；"
+            "颜色、图案、材质、版型、层次和搭配关系；赤足、不穿鞋袜等明确穿戴约束。\n"
+            "必须排除：场景、地点、背景、天气、时间、动作、姿势、表情、活动、日程、人物身份、身体外貌、镜头、构图、光线、氛围和非穿戴道具。"
+            "用户文字里的这些内容也必须忽略，不得写进任何字段。\n"
+            "只输出 JSON 对象本体，不要 Markdown、解释或额外字段。看不清的穿戴细节留空，不要猜测。\n"
+            '格式：{"overall_style":"","clothing":"","footwear":"","accessories":"","hair":"","makeup":"","details":"","constraints":""}\n'
             f"用户补充文字：{user_text or '无'}"
         )
         provider_id = (
@@ -596,12 +600,45 @@ class SchedulerGenerator:
             if image_paths
             else self.config.get("llm_provider")
         )
-        return await self._call_llm(
+        content = await self._call_llm(
             prompt,
             sid=sid,
             image_urls=image_paths,
             provider_id=provider_id,
         )
+        payload = self._extract_json_obj(content)
+        if payload is None:
+            content = await self._call_llm(
+                prompt + "\n上一次输出未能解析。这次必须严格输出上述 JSON 对象本体。",
+                sid=f"{sid}_repair",
+                image_urls=image_paths,
+                provider_id=provider_id,
+            )
+            payload = self._extract_json_obj(content)
+        if payload is None:
+            raise RuntimeError("图片转写模型未返回可解析的穿搭 JSON")
+
+        fields = (
+            ("overall_style", "整体风格"),
+            ("clothing", "服装"),
+            ("footwear", "鞋袜"),
+            ("accessories", "配饰"),
+            ("hair", "发型"),
+            ("makeup", "妆容"),
+            ("details", "颜色材质与版型"),
+            ("constraints", "穿戴约束"),
+        )
+        parts = []
+        for key, label in fields:
+            value = payload.get(key, "")
+            if not isinstance(value, str):
+                continue
+            value = value.strip()
+            if value:
+                parts.append(f"{label}：{value}")
+        if not parts:
+            raise RuntimeError("图片转写模型未返回有效的穿搭字段")
+        return "；".join(parts) + "。"
 
     @staticmethod
     def _extract_completion_text(resp: object) -> str:
@@ -764,6 +801,7 @@ class SchedulerGenerator:
             "你之前的输出未通过校验，需要按要求重写。\n"
             f"校验原因：{reason}\n"
             f"必须使用穿搭风格：{required}\n\n"
+            f"必须落实的衣柜方案：{ctx.outfit_plan}\n\n"
             "请只输出 JSON 对象本体，不要 Markdown，不要解释。\n"
             "输出 JSON 必须包含字段：outfit_style、outfit、schedule。\n"
             f'其中 outfit_style 必须严格等于 "{required}"；outfit 第一行必须以 "风格：{required}" 开头。\n\n'
