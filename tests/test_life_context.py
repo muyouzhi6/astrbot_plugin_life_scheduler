@@ -93,9 +93,7 @@ def _load_main():
     core_package.__path__ = [str(ROOT / "core")]
     core_package.schedule = sys.modules[f"{PACKAGE}.core.schedule"]
     sys.modules[f"{PACKAGE}.core"] = core_package
-    spec = importlib.util.spec_from_file_location(
-        f"{PACKAGE}.main", ROOT / "main.py"
-    )
+    spec = importlib.util.spec_from_file_location(f"{PACKAGE}.main", ROOT / "main.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)

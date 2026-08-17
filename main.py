@@ -12,6 +12,7 @@ from astrbot.core.utils.quoted_message_parser import extract_quoted_message_imag
 
 from .core.data import ScheduleDataManager, WardrobeDataManager
 from .core.generator import SchedulerGenerator
+from .core.images import WardrobeImageStore
 from .core.schedule import LifeScheduler
 from .core.utils import build_character_state_injection, resolve_business_now
 
@@ -24,6 +25,7 @@ class LifeSchedulerPlugin(Star):
         self.data_dir = StarTools.get_data_dir()
         self.schedule_data_file = self.data_dir / "schedule_data.json"
         self.wardrobe_data_file = self.data_dir / "wardrobe.json"
+        self.wardrobe_image_dir = self.data_dir / "wardrobe_images"
 
     async def initialize(self):
         self.data_mgr = ScheduleDataManager(self.schedule_data_file)
@@ -31,6 +33,8 @@ class LifeSchedulerPlugin(Star):
             self.wardrobe_data_file,
             self.config,
         )
+        self.wardrobe_images = WardrobeImageStore(self.wardrobe_image_dir)
+        self.wardrobe_images.prune({entry["id"] for entry in self.wardrobe_mgr.all()})
         self.generator = SchedulerGenerator(
             self.context,
             self.config,
@@ -279,6 +283,13 @@ class LifeSchedulerPlugin(Star):
         if not entries:
             yield event.plain_result("衣柜还是空的")
             return
+        entries = [
+            {
+                **entry,
+                "image_data_uri": self.wardrobe_images.data_uri(entry["id"]),
+            }
+            for entry in entries
+        ]
         template = """
 <!doctype html>
 <html lang="zh-CN">
@@ -306,6 +317,30 @@ class LifeSchedulerPlugin(Star):
       background: #fffdf9;
       box-shadow: 0 4px 12px rgba(79, 63, 48, .08);
     }
+    .photo-wrap {
+      flex: 0 0 250px;
+      width: 250px;
+      min-height: 320px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      border-radius: 10px;
+      background: #eee7de;
+    }
+    .photo {
+      display: block;
+      width: 100%;
+      height: 320px;
+      object-fit: contain;
+      background: #f8f4ee;
+    }
+    .photo-placeholder {
+      padding: 20px;
+      color: #988d82;
+      font-size: 15px;
+      text-align: center;
+    }
     .number {
       flex: 0 0 52px;
       width: 52px;
@@ -321,6 +356,13 @@ class LifeSchedulerPlugin(Star):
     .content { flex: 1; min-width: 0; }
     .entry-title { margin: 2px 0 10px; font-size: 22px; }
     .description { margin: 0; font-size: 17px; line-height: 1.7; white-space: pre-wrap; }
+    @media (max-width: 720px) {
+      body { padding: 18px; }
+      .entry { display: block; padding: 16px; }
+      .number { margin-bottom: 12px; }
+      .photo-wrap { width: 100%; height: auto; min-height: 0; margin-bottom: 16px; }
+      .photo { height: auto; max-height: 520px; }
+    }
   </style>
 </head>
 <body>
@@ -331,6 +373,13 @@ class LifeSchedulerPlugin(Star):
   {% for entry in entries %}
   <section class="entry">
     <div class="number">{{ loop.index }}</div>
+    {% if entry.image_data_uri %}
+    <div class="photo-wrap">
+      <img class="photo" src="{{ entry.image_data_uri }}" alt="穿搭 {{ loop.index }} 展示图">
+    </div>
+    {% else %}
+    <div class="photo-wrap"><div class="photo-placeholder">暂无展示图</div></div>
+    {% endif %}
     <div class="content">
       <h2 class="entry-title">穿搭 {{ loop.index }}</h2>
       <p class="description">{{ entry.description }}</p>
@@ -356,6 +405,44 @@ class LifeSchedulerPlugin(Star):
             for index, entry in enumerate(entries, start=1):
                 lines.append(f"{index}. {entry['description']}")
             yield event.plain_result("\n".join(lines))
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("展示", alias={"life wardrobe image"})
+    async def wardrobe_show_image(
+        self, event: AstrMessageEvent, query: GreedyStr = GreedyStr
+    ):
+        """将图片绑定到指定衣柜方案，重复绑定会覆盖旧图。"""
+        query_text = str(query or "").strip()
+        query_match = re.fullmatch(r"穿搭\s*(\d+)", query_text)
+        if not query_match:
+            yield event.plain_result("请使用：展示 穿搭N")
+            return
+
+        number = int(query_match.group(1))
+        entry = self.wardrobe_mgr.find_by_number(number)
+        if entry is None:
+            yield event.plain_result(
+                f"没有找到穿搭{number}，请先发送“查看衣柜”确认编号。"
+            )
+            return
+
+        image_paths = await self._collect_image_paths(event)
+        if not image_paths:
+            yield event.plain_result("请在这条指令中附上图片，或引用一条带图片的消息。")
+            return
+
+        was_existing = self.wardrobe_images.exists(entry["id"])
+        try:
+            await self.wardrobe_images.save(entry["id"], image_paths[0])
+        except Exception as exc:
+            logger.error("Failed to save wardrobe display image: %s", exc)
+            yield event.plain_result(f"穿搭{number}展示图保存失败：{exc}")
+            return
+
+        action = "已覆盖" if was_existing else "已设置"
+        yield event.plain_result(
+            f"{action}穿搭{number}的展示图，发送“查看衣柜”即可查看。"
+        )
 
     @filter.llm_tool(name="life_wardrobe_add")
     async def llm_wardrobe_add(
@@ -420,6 +507,7 @@ class LifeSchedulerPlugin(Star):
         if entry is None:
             return f"没有找到匹配的衣柜方案：{query}"
         self.wardrobe_mgr.remove(entry["id"])
+        self.wardrobe_images.remove(entry["id"])
         return f"已从衣柜删除：{entry['description']}"
 
     @filter.llm_tool(name="life_wardrobe_edit")

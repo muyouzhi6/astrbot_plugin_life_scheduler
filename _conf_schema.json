@@ -49,8 +49,29 @@
   "wardrobe": {
     "description": "衣柜穿搭方案",
     "hint": "每项只填写可复用的服装、鞋袜、配饰、发型、妆容、颜色材质、版型和穿戴约束。顺序就是‘穿搭N’的编号，新方案会追加到末尾。不要填写场景、动作、日程或镜头描述。",
-    "type": "list",
-    "default": []
+    "type": "template_list",
+    "default": [],
+    "templates": {
+      "outfit": {
+        "name": "穿搭方案",
+        "display_item": "description",
+        "hide_hint_in_list": true,
+        "items": {
+          "id": {
+            "description": "Stable wardrobe ID",
+            "type": "string",
+            "default": "",
+            "invisible": true
+          },
+          "description": {
+            "description": "穿搭描述",
+            "hint": "只填写服装、鞋袜、配饰、发型、妆容和造型细节；展示图请通过‘展示 穿搭N’绑定。",
+            "type": "text",
+            "default": ""
+          }
+        }
+      }
+    }
   },
   "wardrobe_migration_version": {
     "description": "Wardrobe migration version",

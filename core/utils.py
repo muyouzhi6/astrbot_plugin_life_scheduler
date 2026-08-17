@@ -21,6 +21,7 @@ def time_desc(h=None):
         else "深夜"
     )
 
+
 def parse_schedule_time(schedule_time: str | None) -> tuple[int, int]:
     schedule_time = str(schedule_time or "00:00")
     try:
@@ -59,8 +60,10 @@ def extract_schedule_activities(schedule: str) -> list[tuple[int, str]]:
     activities: list[tuple[int, str]] = []
     for match in _SCHEDULE_TIME_RE.finditer(str(schedule or "")):
         hour = int(match.group("hour"))
-        minute = 30 if match.group("half") else int(
-            match.group("minute") or match.group("minute_cn") or "0"
+        minute = (
+            30
+            if match.group("half")
+            else int(match.group("minute") or match.group("minute_cn") or "0")
         )
         text = match.group("text").strip()
         if not text:

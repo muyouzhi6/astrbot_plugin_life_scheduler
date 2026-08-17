@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import re
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, Union
@@ -162,10 +163,11 @@ class WardrobeDataManager:
     def load(self) -> None:
         """Load wardrobe entries and migrate legacy sources when configured."""
         if self._config is not None:
-            configured = self._normalize_descriptions(self._config.get("wardrobe", []))
+            configured = self._normalize_entries(self._config.get("wardrobe", []))
             migration_version = int(
                 self._config.get("wardrobe_migration_version", 0) or 0
             )
+            config_changed = migration_version < 2
             if migration_version < 1:
                 legacy_descriptions: list[str] = []
                 legacy_file_valid = True
@@ -197,27 +199,30 @@ class WardrobeDataManager:
                     )
                     for style in legacy_styles
                 ]
-                configured = self._normalize_descriptions(
+                configured = self._normalize_entries(
                     legacy_descriptions + configured + migrated_styles
                 )
-                self._config["wardrobe"] = configured
                 pool = self._config.get("pool")
                 if isinstance(pool, dict):
                     pool["outfit_styles"] = []
                 if legacy_file_valid:
                     self._config["wardrobe_migration_version"] = 1
 
-                save_config = getattr(self._config, "save_config", None)
-                if callable(save_config):
-                    save_config()
                 if legacy_file_valid and self._path.exists():
                     tmp_path = self._path.with_suffix(".tmp")
                     tmp_path.write_text("[]\n", encoding="utf-8")
                     tmp_path.replace(self._path)
 
-            self._entries = [
-                self._build_entry(description) for description in configured
-            ]
+            self._entries = configured
+            self._config["wardrobe_migration_version"] = 2
+            serialized = self._serialize_entries()
+            if self._config.get("wardrobe") != serialized:
+                self._config["wardrobe"] = serialized
+                config_changed = True
+            if config_changed:
+                save_config = getattr(self._config, "save_config", None)
+                if callable(save_config):
+                    save_config()
             return
 
         if not self._path.exists():
@@ -234,22 +239,7 @@ class WardrobeDataManager:
             self._entries = []
             return
 
-        entries: list[dict[str, str]] = []
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            description = str(item.get("description", "")).strip()
-            if not description:
-                continue
-            entries.append(
-                {
-                    "id": str(item.get("id", len(entries) + 1)),
-                    "created_at": str(item.get("created_at", "")),
-                    "description": description,
-                    "note": str(item.get("note", "")).strip(),
-                }
-            )
-        self._entries = entries
+        self._entries = self._normalize_entries(raw)
 
     @staticmethod
     def _normalize_descriptions(values: object) -> list[str]:
@@ -277,7 +267,7 @@ class WardrobeDataManager:
         return descriptions
 
     @staticmethod
-    def _build_entry(description: str) -> dict[str, str]:
+    def _build_entry(description: str, entry_id: str = "") -> dict[str, str]:
         """Build the runtime view of one configured wardrobe entry.
 
         Args:
@@ -288,11 +278,52 @@ class WardrobeDataManager:
         """
         digest = hashlib.sha256(description.encode("utf-8")).hexdigest()[:16]
         return {
-            "id": f"wardrobe-{digest}",
+            "id": entry_id or f"wardrobe-{digest}",
             "created_at": "",
             "description": description,
             "note": "",
         }
+
+    @classmethod
+    def _normalize_entries(cls, values: object) -> list[dict[str, str]]:
+        """Normalize visible descriptions while preserving stable entry IDs.
+
+        Args:
+            values: Legacy strings or template-list entry dictionaries.
+
+        Returns:
+            Unique wardrobe entries in configured order.
+        """
+        if not isinstance(values, list):
+            return []
+
+        entries: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for value in values:
+            source_id = ""
+            if isinstance(value, dict):
+                source_id = str(value.get("id", "")).strip()
+                value = value.get("description", "")
+            description = str(value or "").strip()
+            canonical = description.casefold()
+            if not description or canonical in seen:
+                continue
+            seen.add(canonical)
+            if not re.fullmatch(r"wardrobe-[A-Za-z0-9_-]+", source_id):
+                source_id = ""
+            entries.append(cls._build_entry(description, source_id))
+        return entries
+
+    def _serialize_entries(self) -> list[dict[str, str]]:
+        """Serialize entries to the template-list configuration shape."""
+        return [
+            {
+                "__template_key": "outfit",
+                "id": entry["id"],
+                "description": entry["description"],
+            }
+            for entry in self._entries
+        ]
 
     def add(self, description: str, *, note: str = "") -> dict[str, str]:
         """Add one normalized outfit plan and persist it atomically.
@@ -317,7 +348,7 @@ class WardrobeDataManager:
             if entry["description"].casefold() == canonical:
                 return dict(entry)
 
-        entry = self._build_entry(description)
+        entry = self._build_entry(description, f"wardrobe-{uuid.uuid4().hex}")
         self._entries.append(entry)
         self.save()
         return dict(entry)
@@ -423,8 +454,7 @@ class WardrobeDataManager:
         for entry in self._entries:
             if entry["id"] != str(entry_id):
                 continue
-            replacement = self._build_entry(description)
-            entry.update(replacement)
+            entry["description"] = description
             self.save()
             return dict(entry)
         raise KeyError(entry_id)
@@ -453,7 +483,7 @@ class WardrobeDataManager:
     def save(self) -> None:
         """Persist entries to configuration or the legacy JSON fallback."""
         if self._config is not None:
-            self._config["wardrobe"] = [entry["description"] for entry in self._entries]
+            self._config["wardrobe"] = self._serialize_entries()
             save_config = getattr(self._config, "save_config", None)
             if callable(save_config):
                 save_config()

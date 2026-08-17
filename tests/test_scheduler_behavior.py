@@ -317,7 +317,8 @@ class SchedulerBehaviorTest(unittest.IsolatedAsyncioTestCase):
             loaded = WardrobeDataManager(Path(tmp) / "wardrobe.json", config)
             self.assertEqual(loaded.find("蓝色半裙")["id"], entry["id"])
             self.assertNotIn("适合通勤", loaded.for_prompt())
-            loaded.replace(entry["id"], "白色衬衫搭配蓝色半裙，赤足不穿鞋袜")
+            updated = loaded.replace(entry["id"], "白色衬衫搭配蓝色半裙，赤足不穿鞋袜")
+            self.assertEqual(updated["id"], entry["id"])
             self.assertIn("赤足", loaded.for_prompt())
 
             newer = loaded.add("黑色针织衫搭配灰色长裤")
@@ -329,7 +330,15 @@ class SchedulerBehaviorTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(loaded.find_by_number(3))
             self.assertEqual(loaded.find_for_user_query("穿搭2")["id"], newer["id"])
             self.assertEqual(loaded.find_for_user_query("2")["id"], newer["id"])
-            self.assertEqual(config["wardrobe"][-1], newer["description"])
+            self.assertEqual(
+                config["wardrobe"][-1]["description"], newer["description"]
+            )
+            self.assertEqual(config["wardrobe"][-1]["__template_key"], "outfit")
+
+            config["wardrobe"] = list(reversed(config["wardrobe"]))
+            reordered = WardrobeDataManager(Path(tmp) / "wardrobe.json", config)
+            self.assertEqual(reordered.find_by_number(1)["id"], newer["id"])
+            self.assertEqual(reordered.find_by_number(2)["id"], entry["id"])
 
     def test_wardrobe_migration_freezes_numbers_and_appends_legacy_styles(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -363,9 +372,12 @@ class SchedulerBehaviorTest(unittest.IsolatedAsyncioTestCase):
                     ),
                 ],
             )
-            self.assertEqual(config["wardrobe_migration_version"], 1)
+            self.assertEqual(config["wardrobe_migration_version"], 2)
             self.assertEqual(config["pool"]["outfit_styles"], [])
             self.assertEqual(json.loads(path.read_text(encoding="utf-8")), [])
+            self.assertTrue(
+                all(item["__template_key"] == "outfit" for item in config["wardrobe"])
+            )
 
             reloaded = WardrobeDataManager(path, config)
             reloaded.add("后来新增的穿搭")
