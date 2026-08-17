@@ -109,18 +109,22 @@ class LifeSchedulerPlugin(Star):
                 deduped.append(image_ref)
         return deduped[:4]
 
-    async def get_life_context(self) -> dict:
-        """
-        获取生活上下文数据（供 DailySharing 插件调用）
-        返回格式符合 DailySharing 的 _parse_life_data 方法要求
+    async def get_life_context(self, *, allow_generate: bool = True) -> dict:
+        """Return today's cached life context for other plugins.
+
+        Args:
+            allow_generate: Whether a missing schedule may be generated through
+                the LLM. Set this to ``False`` for read-only integrations.
+
+        Returns:
+            A DailySharing-compatible context dictionary, or an empty dictionary
+            when today's schedule is unavailable.
         """
         today = resolve_business_now(self.config.get("schedule_time"))
         data = self.data_mgr.get(today)
 
-        if not data:
-            # 尝试生成
+        if not data and allow_generate:
             try:
-                # 注意：这里传入 None 作为 umo，让 generator 使用默认行为
                 data = await self.generator.generate_schedule(today, None)
             except RuntimeError:
                 return {}
