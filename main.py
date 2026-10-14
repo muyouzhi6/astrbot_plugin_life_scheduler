@@ -14,7 +14,11 @@ from .core.generator import SchedulerGenerator
 from .core.image_input import iter_quoted_image_paths, resolve_image_path
 from .core.images import WardrobeImageStore
 from .core.schedule import LifeScheduler
-from .core.utils import build_character_state_injection, resolve_business_now
+from .core.utils import (
+    build_character_state_injection,
+    resolve_business_now,
+    select_current_activity,
+)
 
 
 class LifeSchedulerPlugin(Star):
@@ -152,6 +156,10 @@ class LifeSchedulerPlugin(Star):
         return {
             "outfit": data.outfit,
             "schedule": data.schedule,
+            "current_activity": select_current_activity(
+                data.schedule, today, wrap_previous_day=True
+            ),
+            "current_time": today.strftime("%H:%M"),
             "meta": {
                 "style": data.outfit_style,
             },
