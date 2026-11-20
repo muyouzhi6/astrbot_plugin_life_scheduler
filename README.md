@@ -109,7 +109,9 @@ pip install holidays APScheduler
 life_data = await life_scheduler_plugin.get_life_context()
 ```
 
-返回数据包含 `outfit`、`schedule`、`meta.style` 和 `timeline`。本插件当前保持全局日程语义，不按人格或会话隔离。
+返回数据包含 `outfit`、`schedule`、`meta.style`、`timeline`，以及 `current_activity` 和 `current_time`（`HH:MM`）。当前活动取当前时间之前最近的一条带时间的日程；凌晨尚未到第一条活动时沿用上一天最后的活动。未标注时间的日程保留原文，`current_activity` 返回空字符串。
+
+外部插件可据此选择工作服或睡衣，无需扫描整份日程，避免白天被晚上的睡觉计划误导。读取已缓存日程且不希望触发 LLM 时，可调用 `get_life_context(allow_generate=False)`；没有缓存时返回空字典。本插件当前保持全局日程语义，不按人格或会话隔离。
 
 ## 注意事项
 

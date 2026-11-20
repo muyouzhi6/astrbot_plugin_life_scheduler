@@ -3,8 +3,9 @@ import sys
 import tempfile
 import types
 import unittest
+from datetime import datetime
 from pathlib import Path
-
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = "life_scheduler_plugin_test"
@@ -162,6 +163,62 @@ def _load_main():
 
 
 class LifeContextTests(unittest.IsolatedAsyncioTestCase):
+    async def test_context_reports_current_activity_without_selecting_future_entries(
+        self,
+    ):
+        module = _load_main()
+        from core.data import ScheduleData, ScheduleDataManager
+
+        schedule = "08:00 喝咖啡\n09:00 写代码\n14:00 在窗边看书\n22:30 洗漱睡觉"
+        cases = [
+            ("08:15", "08:00 喝咖啡"),
+            ("09:00", "09:00 写代码"),
+            ("13:59", "09:00 写代码"),
+            ("14:30", "14:00 在窗边看书"),
+            ("22:30", "22:30 洗漱睡觉"),
+            ("02:15", "22:30 洗漱睡觉"),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plugin = object.__new__(module.LifeSchedulerPlugin)
+            plugin.config = {"schedule_time": "07:00"}
+            plugin.data_mgr = ScheduleDataManager(Path(temp_dir) / "schedule.json")
+            plugin.data_mgr.set(
+                ScheduleData(date="2026-01-01", outfit="女仆服", schedule=schedule)
+            )
+            for clock, expected in cases:
+                with self.subTest(clock=clock):
+                    business_now = datetime.fromisoformat("2026-01-01T" + clock)
+                    with patch.object(
+                        module, "resolve_business_now", return_value=business_now
+                    ):
+                        result = await plugin.get_life_context(allow_generate=False)
+                    self.assertEqual(result["current_time"], clock)
+                    self.assertEqual(result["current_activity"], expected)
+                    self.assertEqual(result["schedule"], schedule)
+                    self.assertEqual(result["outfit"], "女仆服")
+
+    async def test_context_keeps_untimed_schedule_without_inventing_an_activity(self):
+        module = _load_main()
+        from core.data import ScheduleData, ScheduleDataManager
+
+        business_now = datetime(2026, 1, 1, 14, 30)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plugin = object.__new__(module.LifeSchedulerPlugin)
+            plugin.config = {"schedule_time": "07:00"}
+            plugin.data_mgr = ScheduleDataManager(Path(temp_dir) / "schedule.json")
+            plugin.data_mgr.set(
+                ScheduleData(
+                    date="2026-01-01", outfit="水手服", schedule="下午去咖啡店"
+                )
+            )
+            with patch.object(
+                module, "resolve_business_now", return_value=business_now
+            ):
+                result = await plugin.get_life_context(allow_generate=False)
+        self.assertEqual(result["current_activity"], "")
+        self.assertEqual(result["current_time"], "14:30")
+        self.assertEqual(result["schedule"], "下午去咖啡店")
+
     async def test_read_only_context_uses_cache_and_skips_generator(self):
         module = _load_main()
         from core.data import ScheduleData, ScheduleDataManager
